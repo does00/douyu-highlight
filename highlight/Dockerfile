@@ -26,7 +26,7 @@ RUN mkdir -p /models/sense-voice && \
     ls -lh
 
 # 流水线脚本
-COPY highlight-pipeline.py llm_highlights.py entrypoint.sh /app/
+COPY highlight-pipeline.py llm_highlights.py highlight-status.py entrypoint.sh /app/
 RUN chmod +x /app/entrypoint.sh
 
 # 默认环境变量（docker-compose.yml 可覆盖）
