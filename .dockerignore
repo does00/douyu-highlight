@@ -1,0 +1,7 @@
+.git
+.gitignore
+bililive-data/
+recordings/
+highlight-work/
+.env
+README.md
