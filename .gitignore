@@ -1,0 +1,6 @@
+.env
+bililive-data/
+recordings/
+highlight-work/
+__pycache__/
+*.pyc
