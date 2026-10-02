@@ -1,0 +1,28 @@
+{
+  "_comment": "多房间配置示例：复制为 highlight-rooms.json 后填写。密钥不要提交到 git。",
+  "ai_global": {
+    "provider": "deepseek",
+    "model": "deepseek-chat",
+    "api_key": "sk-请填写",
+    "proxy": ""
+  },
+  "rooms": [
+    {
+      "room_id": "6570336",
+      "streamer": "主播名",
+      "segdir": "/recordings/主播名",
+      "enabled": true,
+      "season_id": null,
+      "clip": {
+        "win_sec": 180,
+        "win_step": 60,
+        "keep_score": 10,
+        "max_keep": 3,
+        "min_clip": 180,
+        "max_clip": 300,
+        "retention_days": 1
+      },
+      "ai": {"enabled": true}
+    }
+  ]
+}
