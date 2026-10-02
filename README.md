@@ -10,7 +10,7 @@
 | bililive-web | renmu1234/bililive-tools-frontend | Web 管理界面（:13000）|
 | highlight | ghcr.io/does00/douyu-highlight:latest | 转写→打分→剪辑→投稿，每 20 分钟一轮 |
 
-## 部署（黑群晖 / 任意 x86_64 Docker）
+## 部署（任意 x86_64 Docker）
 
 ```bash
 # 1. 拉取本仓库
