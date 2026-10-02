@@ -2,13 +2,12 @@
 #
 # 容器：
 #   bililive      - biliLive-tools 后端：录制 + B站投稿 API（:18010）
-#   bililive-web  - biliLive-tools 前端：Web 管理界面（:13000）
 #   highlight     - 精彩片段流水线：转写 + 双信号打分 + 剪辑 + 投稿
 #
 # 首次启动后：
-#   1. 打开 http://NAS_IP:13000，填 API 地址 http://NAS_IP:18010 和下方 PASSKEY 登录
-#   2. 在 Web 界面添加斗鱼房间 6570336，开启自动录制
-#   3. 在 B站账号管理里扫码登录（投稿用）
+#   1. 用 biliLive-tools 的 API 添加斗鱼房间并开启自动录制
+#      （房间管理：POST http://NAS_IP:18010/recorder/add，见 biliLive-tools 文档）
+#   2. 在 B站账号管理里扫码登录（投稿用）
 
 services:
   bililive:
@@ -27,17 +26,6 @@ services:
       - TZ=Asia/Shanghai
       - BILILIVE_TOOLS_PASSKEY=${BILILIVE_PASSKEY:?请在 .env 里设置 BILILIVE_PASSKEY}
       - BILILIVE_TOOLS_BILIKEY=${BILILIVE_BILIKEY:-bililive-tools}
-    restart: unless-stopped
-
-  bililive-web:
-    image: renmu1234/bililive-tools-frontend
-    container_name: bililive-web
-    ports:
-      - "13000:3000"
-    environment:
-      - TZ=Asia/Shanghai
-    depends_on:
-      - bililive
     restart: unless-stopped
 
   highlight:
