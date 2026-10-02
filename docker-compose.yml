@@ -1,8 +1,9 @@
 # 斗鱼录制 + 精彩片段流水线（黑群晖 Docker）
 #
 # 容器：
-#   bililive      - biliLive-tools 后端：录制 + B站投稿 API（:18010）
-#   highlight     - 精彩片段流水线：转写 + 双信号打分 + 剪辑 + 投稿
+#   bililive         - biliLive-tools 后端：录制 + B站投稿 API（:18010）
+#   highlight        - 精彩片段流水线：转写 + 双信号打分 + 剪辑 + 投稿
+#   highlight-status - 管理界面：房间/剪辑参数/AI 配置/QQ 通知（:18022）
 #
 # 首次启动后：
 #   1. 用 biliLive-tools 的 API 添加斗鱼房间并开启自动录制
