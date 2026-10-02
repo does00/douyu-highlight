@@ -57,9 +57,12 @@ services:
       - STREAMER_NAME=兔了了丶
       - DOUYU_ROOM_ID=6570336
       - BILI_UID=500604364
-      # LLM 标题（可选）：填了就用，不填则只用时间标题
-      # - LLM_API_URL=http://宿主机:18020/generate
-      # - LLM_API_TOKEN=xxx
+      # 多房间（可选）：挂载 highlight-rooms.json 并设置 ROOMS_CONFIG，
+      # 房间/AI/保留策略都在该文件里配（见 highlight-rooms.example.json）
+      # - ./highlight-rooms.json:/work/highlight-rooms.json:ro
+      # - ROOMS_CONFIG=/work/highlight-rooms.json
+      # B 站合集（可选）：投稿后自动加入合集，需 B 站 Cookie（含 bili_jct）
+      # - BILI_SESSDATA=
     depends_on:
       - bililive
     restart: unless-stopped
