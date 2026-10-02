@@ -300,9 +300,22 @@ savedMsg('msg_clips');await loadStatus();
 }catch(e){document.getElementById('msg_clips').textContent='失败：'+e.message;}}
 
 // AI 配置
+async function loadModels(){
+const pv=document.getElementById('ai_provider').value||'deepseek';
+const sel=document.getElementById('ai_model');
+try{
+const h=await api('/api/models?provider='+encodeURIComponent(pv));
+const models=(h&&h.models)||[];
+const cur=G.ai_global.model||'';
+sel.innerHTML=models.map(m=>'<option value="'+esc(m)+'"'+(m===cur?' selected':'')+'>'+esc(m)+'</option>').join('')
+||'<option value="">（无可用模型）</option>';
+if(cur&&models.indexOf(cur)>=0)sel.value=cur;
+}catch(e){sel.innerHTML='<option value="">加载失败，点刷新重试</option>';}}
+function onProviderChange(){loadModels();}
 function renderAI(){renderNotify();
 document.getElementById('ai_relay').value=G.ai_global.relay_url||'';
-document.getElementById('ai_model').value=G.ai_global.model||'';
+document.getElementById('ai_provider').value=G.ai_global.provider||'deepseek';
+loadModels();
 document.getElementById('t_ai_rooms').innerHTML=G.rooms.map((r,i)=>{
 const en=r.ai&&r.ai.enabled!==false;
 return '<tr><td>'+esc(r.room_id)+'</td><td>'+esc(r.streamer)+'</td>'+
