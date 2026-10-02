@@ -36,6 +36,10 @@ docker compose logs -f highlight
 
 录像保存在 `./recordings/<主播>/`（.ts + .xml），highlight 容器会自动处理。
 
+## 管理界面
+
+打开 `http://NAS_IP:18022`：房间管理、剪辑参数（窗口/步长/时长/阈值）、AI 配置、QQ 投稿通知、投稿记录都在这里配。
+
 ## 更新
 
 ```bash
