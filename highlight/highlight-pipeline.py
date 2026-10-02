@@ -857,7 +857,7 @@ def process_room(room):
             else:
                 clip_t = datetime.now(cst)
             tstr = clip_t.strftime("%H%M%S")
-            day = clip_t.strftime("%Y-%m-%d")
+            day = clip_t.strftime("%m-%d")
             out = os.path.join(WORKDIR, f"{STREAMER}_{day}_精彩_{tstr}.mp4")
             if not clip(ts_path, cs, ce, out):
                 log(f"  剪辑失败 [{cs:.0f},{ce:.0f}]"); continue
@@ -873,9 +873,9 @@ def process_room(room):
                 except Exception as e:
                     log(f"  标题生成失败: {e}")
             if title:
-                title = f"{STREAMER} {day} {title}"
+                title = f"{STREAMER} {title} {day}"
             else:
-                title = f"{STREAMER} {day} 直播精彩片段 {tstr}"
+                title = f"{STREAMER} 直播精彩片段 {day} {tstr}"
             try:
                 task = upload(out, title, desc)
                 log(f"  已投稿: {title} ({ce-cs:.0f}s) task={task}")
