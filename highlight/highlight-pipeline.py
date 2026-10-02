@@ -531,6 +531,71 @@ def upload(path, title, desc=None):
     with urllib.request.urlopen(req, timeout=60) as r:
         return json.load(r)["taskId"]
 
+# ---------------- AstrBot QQ 通知 ----------------
+# 投稿成功后经 AstrBot OpenAPI 发 QQ 通知。配置：环境变量优先，
+# 否则读 highlight-rooms.json 的 notify 节（管理页 AI 配置 Tab 维护）。
+# fail-open：失败只记日志，不影响流水线。
+def _notify_cfg():
+    cfg = {}
+    try:
+        cfg = json.load(open(ROOMS_CONFIG)).get("notify", {}) or {}
+    except Exception:
+        pass
+    url = os.environ.get("ASTRBOT_NOTIFY_URL", "") or cfg.get("url", "")
+    return {
+        "url": url.rstrip("/"),
+        "key": os.environ.get("ASTRBOT_NOTIFY_KEY", "") or cfg.get("api_key", ""),
+        "umo": os.environ.get("ASTRBOT_NOTIFY_UMO", "") or cfg.get("umo", ""),
+        "enabled": bool(cfg.get("enabled", True)),
+    }
+
+def _egress_proxy():
+    """沙箱出站直连会被透明劫持 RST：取 CONNECT 代理地址。"""
+    p = (os.environ.get("PROXY_URL") or os.environ.get("HTTPS_PROXY")
+         or os.environ.get("HTTP_PROXY") or "")
+    if not p:
+        try:
+            with open("/home/hatch/agsbx/.proxyenv") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("EGRESS_PROXY="):
+                        p = line.split("=", 1)[1].strip()
+                        break
+        except Exception:
+            pass
+    return p
+
+def _urlopen(req, timeout):
+    """经 egress CONNECT 代理请求（沙箱直连会被 RST）；无代理配置时直连。"""
+    import urllib.request
+    proxy = _egress_proxy()
+    if proxy:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        return opener.open(req, timeout=timeout)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+def notify_qq_upload(title, duration_s, streamer=None):
+    n = _notify_cfg()
+    if not (n["enabled"] and n["url"] and n["key"] and n["umo"]):
+        return
+    import urllib.request
+    text = (f"\U0001f4e4 B站投稿成功\n"
+            f"主播：{streamer or STREAMER}\n"
+            f"标题：{title}\n"
+            f"时长：{duration_s:.0f}s")
+    payload = {"umo": n["umo"], "message": text}
+    try:
+        req = urllib.request.Request(
+            f"{n['url']}/api/v1/im/messages",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json",
+                     "X-API-Key": n["key"]})
+        with _urlopen(req, timeout=30) as r:
+            log(f"  QQ通知已发送: {r.status}")
+    except Exception as e:
+        log(f"  QQ通知失败: {e}")
+
 # ---------------- 主流程 ----------------
 def load_rooms_config():
     """读取多房间配置。没有配置文件时回退到单房间（环境变量）模式。"""
@@ -682,9 +747,17 @@ def process_room(room):
             json.dump(state, open(STATE, "w"))
 
     # 保留策略清理：删除处理完超过 N 天的 .ts/.xml
+    # 成品片段 .mp4 共用同一个保留天数参数
     if RETENTION_DAYS > 0 and not DRY_RUN:
         import time
         cutoff = time.time() - RETENTION_DAYS * 86400
+        for _mp4 in glob.glob(os.path.join(WORKDIR, "*_精彩_*.mp4")):
+            try:
+                if os.path.getmtime(_mp4) < cutoff:
+                    os.remove(_mp4)
+                    log(f"  成品保留期满删除: {os.path.basename(_mp4)}")
+            except OSError:
+                pass
         for base, ts in list(processed_at.items()):
             if ts < cutoff:
                 ts_path = os.path.join(SEGDIR, base)
@@ -873,12 +946,13 @@ def process_room(room):
                 except Exception as e:
                     log(f"  标题生成失败: {e}")
             if title:
-                title = f"{STREAMER} {title} {day}"
+                title = f"[{STREAMER}] {title} {day}"
             else:
-                title = f"{STREAMER} 直播精彩片段 {day} {tstr}"
+                title = f"[{STREAMER}] 直播精彩片段 {day} {tstr}"
             try:
                 task = upload(out, title, desc)
                 log(f"  已投稿: {title} ({ce-cs:.0f}s) task={task}")
+                notify_qq_upload(title, ce - cs)
                 state.setdefault("uploaded", []).append(
                     {"cid": cid, "title": title, "desc": desc,
                      "start": cs, "end": ce, "score": sc,
@@ -902,6 +976,14 @@ def process_room(room):
         # 录像保留策略由 RECORDING_RETENTION_DAYS 控制（0=永久保留）
         # 清理逻辑在 main() 开头统一执行
         save_state()
+        # 删临时合并文件（merged_*.ts/xml），源文件按保留策略另行处理
+        if os.path.basename(ts_path).startswith("merged_") and os.path.dirname(ts_path) == WORKDIR:
+            for _mp in (ts_path, ts_path[:-3] + ".xml"):
+                try:
+                    if os.path.exists(_mp):
+                        os.remove(_mp)
+                except OSError:
+                    pass
 
     log("done")
 
