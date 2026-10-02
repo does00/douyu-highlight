@@ -9,7 +9,7 @@
 | bililive | renmu1234/bililive-tools-backend | 录制斗鱼直播 + B站投稿 API（:18010）|
 | highlight | ghcr.io/does00/douyu-highlight:latest | 转写→打分→剪辑→投稿，每 20 分钟一轮 |
 
-## 部署（黑群晖 / 任意 x86_64 Docker）
+## 部署（任意 x86_64 Docker 主机）
 
 ```bash
 # 1. 拉取本仓库
@@ -30,7 +30,7 @@ docker compose logs -f highlight
 
 ## 首次配置
 
-1. 通过 biliLive-tools API 添加斗鱼房间（`POST http://NAS_IP:18010/recorder/add`，请求头带 PASSKEY）
+1. 通过 biliLive-tools API 添加斗鱼房间（`POST http://服务器IP:18010/recorder/add`，请求头带 PASSKEY）
 2. 房间配置：ffmpeg 模式，开启自动录制
 3. 在 B站账号管理里扫码登录（投稿用）
 
@@ -38,7 +38,7 @@ docker compose logs -f highlight
 
 ## 管理界面
 
-打开 `http://NAS_IP:18022`：房间管理、剪辑参数（窗口/步长/时长/阈值）、AI 配置、QQ 投稿通知、投稿记录都在这里配。
+打开 `http://服务器IP:18022`：房间管理、剪辑参数（窗口/步长/时长/阈值）、AI 配置、QQ 投稿通知、投稿记录都在这里配。
 
 ## 更新
 
