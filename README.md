@@ -7,7 +7,6 @@
 | 容器 | 镜像 | 作用 |
 |------|------|------|
 | bililive | renmu1234/bililive-tools-backend | 录制斗鱼直播 + B站投稿 API（:18010）|
-| bililive-web | renmu1234/bililive-tools-frontend | Web 管理界面（:13000）|
 | highlight | ghcr.io/does00/douyu-highlight:latest | 转写→打分→剪辑→投稿，每 20 分钟一轮 |
 
 ## 部署（黑群晖 / 任意 x86_64 Docker）
@@ -31,10 +30,9 @@ docker compose logs -f highlight
 
 ## 首次配置
 
-1. 打开 `http://NAS_IP:13000`
-2. API 地址填 `http://NAS_IP:18010`，密钥填 `.env` 里的 `BILILIVE_PASSKEY`
-3. 添加斗鱼房间 `6570336`，开启自动录制（ffmpeg 模式）
-4. 在 B站账号管理里扫码登录（投稿用）
+1. 通过 biliLive-tools API 添加斗鱼房间（`POST http://NAS_IP:18010/recorder/add`，请求头带 PASSKEY）
+2. 房间配置：ffmpeg 模式，开启自动录制
+3. 在 B站账号管理里扫码登录（投稿用）
 
 录像保存在 `./recordings/<主播>/`（.ts + .xml），highlight 容器会自动处理。
 
