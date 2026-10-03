@@ -183,7 +183,9 @@ label{display:inline-block;min-width:110px;color:#9fb2d8;font-size:13px}
 <div class="form-row"><label>中继地址</label><input id="ai_relay" style="width:320px"></div>
 <div class="form-row"><label>API Key</label><input id="ai_key" type="password" style="width:320px" placeholder="AIza…（直连模式用，留空则用中继）"></div>
 <div class="form-row"><label>代理地址</label><input id="ai_proxy" style="width:320px" placeholder="http://代理:端口（仅 Gemini 需要）"></div>
-<div class="form-row"><label>模型</label><select id="ai_model" style="width:260px"><option>加载中…</option></select>
+<div class="form-row"><label>模型</label><select id="ai_model" style="width:260px"><option>加载中…</option></select></div>
+<div class="form-row"><label>挑段提示词</label><textarea id="ai_prompt" rows="6" style="width:100%" placeholder="留空用默认提示词"></textarea>
+<span class="hint">只写你的要求，不用写[转写][弹幕]标签和JSON格式（系统自动拼）。例："只选打架吵架破防的时刻，不要闲聊碎碎念，宁可不选也别凑数"。留空恢复默认。时长（180-600秒）自动从剪辑管理读取。</span></div>
 <button onclick="loadModels()">刷新模型列表</button></div>
 <div class="form-row"><button onclick="testAI()">🔌 测试连通性</button>
 <span id="ai_test_result" class="hint"></span></div>
@@ -304,7 +306,7 @@ document.getElementById('clip_form').innerHTML=
 '<div class="form-row"><label>保留阈值</label><input id="c_score" type="number" step="0.5" value="'+(c.keep_score??10)+'">'+
 '<span class="hint">打分低于这个的直接扔掉。5=平衡，10=只要高质量（默认，数量少），15=只留最炸的。实测优质片段一般在13-17分</span></div>'+
 '<div class="form-row"><label>最多片段</label><input id="c_max" type="number" value="'+(c.max_keep??3)+'">'+
-'<span class="hint">每30分钟最多剪几个片段投稿，多了容易审美疲劳</span></div>'+
+'<span class="hint">每个录像文件最多剪几个片段投稿，多了容易审美疲劳</span></div>'+
 '<div class="form-row"><label>保留天数</label><input id="c_ret" type="number" value="'+(c.retention_days??1)+'">'+
 '<span class="hint">原始录像处理完后保留几天再删除，0=永久保留（硬盘要够大）</span></div>'+
 '<div class="form-row"><label>最短时长</label><input id="c_min" type="number" value="'+(c.min_clip??180)+'">'+
@@ -340,6 +342,7 @@ function onProviderChange(){loadModels();}
 function renderAI(){renderNotify();
 document.getElementById('ai_relay').value=G.ai_global.relay_url||'';
 document.getElementById('ai_provider').value=G.ai_global.provider||'deepseek';
+document.getElementById('ai_prompt').value=G.ai_global.prompt||'';
 loadModels();
 document.getElementById('t_ai_rooms').innerHTML=G.rooms.map((r,i)=>{
 const en=r.ai&&r.ai.enabled!==false;
@@ -351,7 +354,8 @@ relay_url:document.getElementById('ai_relay').value.trim(),
 proxy:document.getElementById('ai_proxy').value.trim(),
 api_key:document.getElementById('ai_key').value.trim(),
 provider:document.getElementById('ai_provider').value,
-model:document.getElementById('ai_model').value})});
+model:document.getElementById('ai_model').value,
+prompt:document.getElementById('ai_prompt').value.trim()})});
 savedMsg('msg_ai');await loadStatus();renderNotify();
 }catch(e){document.getElementById('msg_ai').textContent='失败：'+e.message;}}
 // QQ 投稿通知（AstrBot）
@@ -595,7 +599,7 @@ class Handler(BaseHTTPRequestHandler):
             q = _pq(_up(self.path).query)
             pv = (q.get("provider", ["deepseek"])[0] or "deepseek").lower()
             if pv == "deepseek":
-                models = ["deepseek-chat", "deepseek-flash", "deepseek-v4-pro"]
+                models = ["deepseek-chat", "deepseek-reasoner"]
             elif pv == "gemini":
                 models = ["gemini-3-flash-preview", "gemini-2.0-flash",
                           "gemini-1.5-flash", "gemini-1.5-pro"]
@@ -620,7 +624,8 @@ class Handler(BaseHTTPRequestHandler):
             pv = g.get("provider", "deepseek")
             llm_highlights.LLM_PROVIDER = pv
             # 模型按 provider 纠正（防止存的是别的 provider 的模型名）
-            valid_ds = ("deepseek-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner")
+            # 注意：deepseek-flash 实测返回空内容，已从合法列表移除
+            valid_ds = ("deepseek-chat", "deepseek-reasoner")
             valid_gm = ("gemini-3-flash-preview", "gemini-2.0-flash",
                         "gemini-1.5-flash", "gemini-1.5-pro")
             m = g.get("model", "")
@@ -886,6 +891,8 @@ class Handler(BaseHTTPRequestHandler):
                 g["provider"] = body["provider"]
             if body.get("model"):
                 g["model"] = body["model"]
+            if "prompt" in body:
+                g["prompt"] = body["prompt"]
         save_rooms(cfg)
         self._json({"ok": True})
 
