@@ -16,7 +16,14 @@ v1 的问题已修：
 环境变量（沿用 v1，新增 TRANSCRIBE_MODEL_DIR）：
     SEGDIR / WORKDIR / STATE / LOG / BILILIVE_CONFIG / BILI_UID / DOUYU_ROOM_ID / STREAMER_NAME
 """
-import json, os, re, subprocess, glob, statistics, sys, struct, wave, io
+import json, os, re, subprocess, glob, statistics, sys, wave, io
+from concurrent.futures import ProcessPoolExecutor, as_completed
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    np = None
+    HAS_NUMPY = False
 from datetime import datetime, timezone, timedelta
 
 # ---------------- 配置 ----------------
@@ -31,7 +38,25 @@ BILILIVE_PASSKEY = os.environ.get("BILILIVE_PASSKEY", "")  # 设了就不用读 
 UID = int(os.environ.get("BILI_UID", "500604364"))
 ROOM_ID = os.environ.get("DOUYU_ROOM_ID", "6570336")
 STREAMER = os.environ.get("STREAMER_NAME", "兔了了丶")
+PLATFORM = "DouYu"  # 当前房间平台（process_room 中按房间配置覆盖）
 MODEL_DIR = os.environ.get("TRANSCRIBE_MODEL_DIR", "/home/hatch/workspace/models/sense-voice")
+
+# 平台 -> (中文名, 直播间 URL 模板)
+PLATFORM_INFO = {
+    "DouYu": ("斗鱼", "https://www.douyu.com/{rid}"),
+    "HuYa": ("虎牙", "https://www.huya.com/{rid}"),
+    "DouYin": ("抖音", "https://live.douyin.com/{rid}"),
+    "TikTok": ("TikTok", "https://www.tiktok.com/{rid}/live"),
+    "Bilibili": ("B站", "https://live.bilibili.com/{rid}"),
+}
+
+
+def platform_room_url(platform=None, rid=None):
+    """按平台生成直播间链接（投稿 source / 简介用）。"""
+    p = platform or PLATFORM
+    r = rid or ROOM_ID
+    name, tmpl = PLATFORM_INFO.get(p, PLATFORM_INFO["DouYu"])
+    return tmpl.format(rid=r), name
 
 # 多房间配置（WebUI 管理）
 ROOMS_CONFIG = os.environ.get("ROOMS_CONFIG",
@@ -81,6 +106,10 @@ try:
 except ImportError:
     TRANSCRIBE_OK = False
 
+if TRANSCRIBE_OK and not HAS_NUMPY:
+    TRANSCRIBE_OK = False
+    log("numpy 缺失，转写降级为纯弹幕模式")
+
 if not TRANSCRIBE_OK:
     log("转写不可用（--no-transcribe 或模型缺失），降级为纯弹幕模式")
 
@@ -99,15 +128,86 @@ def extract_audio(ts_path, start, dur):
         raw = wf.readframes(n)
     return raw, n / 16000.0
 
-def transcribe_piece(pcm_raw):
-    """转写一段 PCM（<=60s），返回 [(t_start, token)]，t 相对段首。"""
-    n = len(pcm_raw) // 2
-    samples = [s / 32768.0 for s in struct.unpack(f"<{n}h", pcm_raw)]
+def transcribe_piece(samples):
+    """转写一段 float32 PCM（<=60s），返回 [(t_start, token)]，t 相对段首。"""
     s = _get_rec().create_stream()
     s.accept_waveform(16000, samples)
     _get_rec().decode_stream(s)
     r = s.result
     return list(zip(r.timestamps, r.tokens)), r.text
+
+# ---------------- VAD（跳过静音段）+ 音频能量 ----------------
+_VAD_MODEL_PATH = os.path.join(os.path.dirname(MODEL_DIR), "silero_vad.onnx")
+_vad = None
+
+def _get_vad():
+    """Silero VAD（sherpa-onnx），缺模型时返回 None。"""
+    global _vad
+    if _vad is None and TRANSCRIBE_OK and os.path.exists(_VAD_MODEL_PATH):
+        try:
+            cfg = sherpa_onnx.VadModelConfig()
+            cfg.silero_vad.model = _VAD_MODEL_PATH
+            cfg.silero_vad.threshold = 0.5
+            cfg.silero_vad.min_silence_duration = 0.5
+            cfg.silero_vad.min_speech_duration = 0.25
+            cfg.silero_vad.window_size = 512
+            cfg.sample_rate = 16000
+            cfg.num_threads = 1
+            _vad = sherpa_onnx.VadModel.create(cfg)
+            log("  VAD 模型已加载")
+        except Exception as e:
+            log(f"  VAD 加载失败，回退全量转写: {e}")
+            _vad = False
+    return _vad or None
+
+
+def vad_speech_segments(samples, sr=16000):
+    """返回 [(start_sec, end_sec)] 有声段（相对输入起点）。无 VAD 时返回整段。"""
+    vad = _get_vad()
+    if vad is None:
+        return [(0.0, len(samples) / sr)]
+    vad.reset()
+    ws = vad.window_size()
+    n_win = len(samples) // ws
+    if n_win == 0:
+        return [(0.0, len(samples) / sr)]
+    is_sp = np.zeros(n_win, dtype=bool)
+    for i in range(n_win):
+        is_sp[i] = vad.is_speech(samples[i * ws:(i + 1) * ws])
+    win_sec = ws / sr
+    segs, i = [], 0
+    while i < n_win:
+        if is_sp[i]:
+            j = i
+            while j < n_win and is_sp[j]:
+                j += 1
+            segs.append((i * win_sec, j * win_sec))
+            i = j
+        else:
+            i += 1
+    # 合并间隔 <1s 的段，过滤 <0.5s 的碎段，前后各 pad 0.3s
+    merged = []
+    for s0, s1 in segs:
+        if merged and s0 - merged[-1][1] < 1.0:
+            merged[-1][1] = s1
+        else:
+            merged.append([s0, s1])
+    out = []
+    for s0, s1 in merged:
+        if s1 - s0 < 0.5:
+            continue
+        out.append((max(0.0, s0 - 0.3), s1 + 0.3))
+    return out or [(0.0, len(samples) / sr)]
+
+
+def frame_rms(samples, sr=16000, frame_sec=1.0):
+    """每 frame_sec 秒的 RMS 能量，返回 np.ndarray。"""
+    n = int(sr * frame_sec)
+    m = (len(samples) // n) * n
+    if m == 0:
+        return np.zeros(1, dtype=np.float64)
+    frames = samples[:m].reshape(-1, n).astype(np.float64)
+    return np.sqrt((frames ** 2).mean(axis=1))
 
 # 当前处理房间（多房间循环时设置，用于转写缓存/去重命名空间隔离）
 _CUR_ROOM_ID = None
@@ -125,7 +225,8 @@ def load_cached_transcript(ts_path):
     try:
         d = json.load(open(cp))
         st = os.stat(ts_path)
-        if d.get("size") == st.st_size and d.get("mtime") == st.st_mtime:
+        if d.get("size") == st.st_size and d.get("mtime") == st.st_mtime \
+                and d.get("chunk_sec", TRANSCRIBE_CHUNK) == TRANSCRIBE_CHUNK:
             chunks = {int(k): v for k, v in d.get("chunks", {}).items()}
             if chunks:
                 log(f"  转写缓存命中 {len(chunks)} 块")
@@ -141,6 +242,7 @@ def save_chunk_cache(ts_path, chunks):
         st = os.stat(ts_path)
         tmp = cp + ".tmp"
         json.dump({"size": st.st_size, "mtime": st.st_mtime,
+                   "chunk_sec": TRANSCRIBE_CHUNK,
                    "chunks": {str(k): v for k, v in chunks.items()}},
                   open(tmp, "w"), ensure_ascii=False)
         os.replace(tmp, cp)  # 原子写入，避免被 kill 时损坏
@@ -148,55 +250,119 @@ def save_chunk_cache(ts_path, chunks):
         log(f"  转写缓存写入失败: {e}")
 
 def transcribe_chunk_words(ts_path, off, dur):
-    """转写 [off, off+dur]（内部 60s 一喂），返回 [(全局秒, token)]。"""
+    """转写 [off, off+dur]：numpy 转换 + VAD 跳过静音段（有声段内部 60s 一喂）。
+    返回 (words[(全局秒, token)], energy[(全局秒, rms)])。"""
     got = extract_audio(ts_path, off, dur)
     if not got:
-        return []
+        return [], []
     raw, _ = got
     import gc
-    words = []
-    pos = 0
-    step = int(FEED_PIECE * 16000 * 2)
-    while pos < len(raw):
-        sub = raw[pos:pos + step]
-        try:
-            toks, _ = transcribe_piece(sub)
-        except Exception as e:
-            log(f"转写子块失败 @{off+pos/32000:.0f}s: {e}")
-            pos += len(sub)
-            continue
-        base = off + pos / 32000.0
-        for t, tok in toks:
-            words.append((base + t, tok))
-        pos += len(sub)
-        del sub
+    # #1: numpy 一次转换（替代 struct.unpack 纯 Python 循环）
+    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
     del raw
+    # #6: 每秒 RMS 能量（供打分用）
+    rms = frame_rms(samples)
+    energy = [(off + i, float(r)) for i, r in enumerate(rms)]
+    # #2: VAD 只转写有声段
+    segs = vad_speech_segments(samples)
+    total_speech = sum(e - s for s, e in segs)
+    if total_speech < dur * 0.999:
+        log(f"  VAD: {dur:.0f}s -> {len(segs)} 段有声 {total_speech:.0f}s（跳过 {dur - total_speech:.0f}s 静音）")
+    words = []
+    step = int(FEED_PIECE * 16000)
+    n_samp = len(samples)
+    for s0, s1 in segs:
+        p0 = int(s0 * 16000)
+        p_end = min(int(s1 * 16000), n_samp)
+        while p0 < p_end:
+            p1 = min(p0 + step, p_end)
+            sub = samples[p0:p1]
+            try:
+                toks, _ = transcribe_piece(sub)
+            except Exception as e:
+                log(f"转写子块失败 @{off + p0 / 16000:.0f}s: {e}")
+                p0 = p1
+                continue
+            base = off + p0 / 16000.0
+            for t, tok in toks:
+                words.append((base + t, tok))
+            p0 = p1
+            del sub
+    del samples
     gc.collect()
-    return words
+    return words, energy
+
+def _transcribe_workers():
+    """转写并行数：环境变量 TRANSCRIBE_WORKERS 优先，否则按 CPU 核数（上限 4，省内存）。"""
+    env = os.environ.get("TRANSCRIBE_WORKERS", "").strip()
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            pass
+    cpu = os.cpu_count() or 2
+    return max(1, min(cpu, 4))
+
+
+def _transcribe_chunk_job(args):
+    """子进程任务：转写一个 chunk，返回 (idx, words, energy)。模型按进程懒加载。"""
+    ts_path, off, dur, idx = args
+    try:
+        cw, ce = transcribe_chunk_words(ts_path, off, dur)
+    except Exception as e:
+        log(f"[chunk {idx}] 转写异常: {e}")
+        cw, ce = [], []
+    return idx, cw, ce
+
 
 def transcribe_ts(ts_path):
-    """转写整个 .ts（300s 一块），每块落盘缓存，被 kill 可续跑。返回 [(全局秒, token)]。"""
+    """转写整个 .ts（300s 一块），多进程并行（自适应核数），每块落盘缓存，被 kill 可续跑。
+    返回 (words[(全局秒, token)], energy[(全局秒, rms)])。"""
     dur = ts_duration(ts_path)
     chunks = load_cached_transcript(ts_path)
-    off, idx, n_new = 0.0, 0, 0
+    pending, off, idx = [], 0.0, 0
     while off < dur:
         if idx not in chunks:
-            cw = transcribe_chunk_words(ts_path, off, min(TRANSCRIBE_CHUNK, dur - off))
-            chunks[idx] = cw
-            n_new += 1
-            save_chunk_cache(ts_path, chunks)  # 每块落盘，防 kill 丢进度
+            pending.append((ts_path, off, min(TRANSCRIBE_CHUNK, dur - off), idx))
         off += TRANSCRIBE_CHUNK
         idx += 1
-        if idx % 3 == 0:
-            log(f"  转写进度 {off:.0f}/{dur:.0f}s")
+    n_new = len(pending)
+    if pending:
+        workers = _transcribe_workers()
+        if workers > 1 and len(pending) > 1:
+            log(f"  并行转写 {len(pending)} 块（{workers} 进程）")
+            with ProcessPoolExecutor(max_workers=workers) as ex:
+                futs = [ex.submit(_transcribe_chunk_job, a) for a in pending]
+                done = 0
+                for fut in as_completed(futs):
+                    i2, cw, ce = fut.result()
+                    chunks[i2] = {"w": cw, "e": ce}
+                    save_chunk_cache(ts_path, chunks)  # 每块落盘，防 kill 丢进度
+                    done += 1
+                    if done % 3 == 0:
+                        log(f"  转写进度 {done}/{len(pending)} 块")
+        else:
+            done = 0
+            for a in pending:
+                i2, cw, ce = _transcribe_chunk_job(a)
+                chunks[i2] = {"w": cw, "e": ce}
+                save_chunk_cache(ts_path, chunks)
+                done += 1
+                if done % 3 == 0:
+                    log(f"  转写进度 {done}/{len(pending)} 块")
     if n_new:
         log(f"  本次新转写 {n_new} 块")
-    words = []
+    words, energy = [], []
     for k in sorted(chunks):
         if k * TRANSCRIBE_CHUNK >= dur:
             continue  # 过滤超出当前时长的旧分块（文件被截短的边缘情况）
-        words.extend(chunks[k])
-    return words
+        c = chunks[k]
+        if isinstance(c, dict):  # 新格式
+            words.extend(c.get("w", []))
+            energy.extend(c.get("e", []))
+        else:  # 旧缓存格式（只有词，无能量）
+            words.extend(c)
+    return words, energy
 
 def ts_duration(ts_path):
     r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -287,8 +453,9 @@ HYPE_RE = re.compile(r"哈哈|大笑|笑死|卧槽|我操|我靠|牛逼|牛比|�
 INTERACT_RE = re.compile(r"你们|兄弟们|宝子|家人们|宝宝们|看好了|注意看|来了来了|全体起立")
 DM_HYPE_RE = re.compile(r"哈哈|233|666|hhh|卧槽|awsl|牛[逼比bB]|离谱|绷不住|笑死|泪目|[！!]{3,}")
 
-def score_window(ws, we, words, danmaku, bursts):
-    """对 [ws, we] 窗口打分，返回 (score, reasons)。"""
+def score_window(ws, we, words, danmaku, bursts, energy=None, estats=None):
+    """对 [ws, we] 窗口打分，返回 (score, reasons)。
+    energy: [(t, rms)] 全局秒级能量；estats: (mean, std, p90)。"""
     text = "".join(tok for t, tok in words if ws <= t <= we)
     wts = [t for t, tok in words if ws <= t <= we]
     score, reasons = 0.0, []
@@ -297,7 +464,7 @@ def score_window(ws, we, words, danmaku, bursts):
     hype_n = len(HYPE_RE.findall(text))
     if hype_n:
         s = min(10, 2 * hype_n); score += s; reasons.append(f"高能词×{hype_n}+{s}")
-    punct_n = text.count("！") + text.count("？")
+    punct_n = text.count("！") + text.count("？") + text.count("!") + text.count("?")
     if punct_n:
         s = min(5, punct_n); score += s; reasons.append(f"情绪标点×{punct_n}+{s}")
     inter_n = len(INTERACT_RE.findall(text))
@@ -322,6 +489,18 @@ def score_window(ws, we, words, danmaku, bursts):
             read_n += 1
     if read_n:
         s = min(12, 4 * read_n); score -= s; reasons.append(f"念弹幕×{read_n}-{s}")
+
+    # --- 音频能量信号（笑声/欢呼/音量突增） ---
+    if energy and estats:
+        emean, estd, ep90 = estats
+        ew = [r for t, r in energy if ws <= t <= we]
+        if ew:
+            emax = max(ew)
+            # 音量突增：峰值远超均值（欢呼、尖叫、大笑）
+            if emax > emean + 2.5 * estd and emax > 0.03:
+                score += 4; reasons.append(f"音量突增+4")
+            elif sum(ew) / len(ew) > ep90:
+                score += 2; reasons.append("高能量段+2")
 
     # --- 观众信号（加成） ---
     dm_in = [(t, u, i, x) for t, u, i, x in danmaku if ws - 20 <= t <= we + 5]
@@ -352,20 +531,44 @@ def nms(cands, max_keep=6):
     kept.sort()
     return kept
 
-def find_candidates(words, danmaku, max_keep=6):
-    """滑动窗口打分 + 非极大值抑制，返回 [(ws, we, score, reasons, title)]（按时间排序）。"""
+def find_candidates(words, danmaku, energy=None, max_keep=6):
+    """滑动窗口打分 + 自适应阈值 + 非极大值抑制。
+    返回 [(ws, we, score, reasons, title)]（按时间排序）。
+    自适应：先按 KEEP_SCORE 过滤；过线不足 max_keep 个时，放宽到 ABS_FLOOR
+    按分数补足（文静场次也能选出相对最佳时刻，挂机垃圾场次仍被下限挡掉）。"""
     if not words:
         return []
     bursts, thr = danmaku_bursts(danmaku)
     dur = words[-1][0]
-    cands = []
+    # 音频能量全局统计（供窗口内突增判断）
+    estats = None
+    if energy:
+        rms = np.array([r for _, r in energy], dtype=np.float64)
+        if len(rms):
+            estats = (float(rms.mean()), float(rms.std()),
+                      float(np.percentile(rms, 90)))
+    # 全部窗口打分（先不过滤）
+    scored = []
     ws = 0.0
     while ws + WIN_SEC <= dur + WIN_STEP:
         we = min(ws + WIN_SEC, dur)
-        score, reasons, _ = score_window(ws, we, words, danmaku, bursts)
-        if score >= KEEP_SCORE:
-            cands.append((ws, we, score, reasons, None))
+        score, reasons, _ = score_window(ws, we, words, danmaku, bursts, energy, estats)
+        scored.append((ws, we, score, reasons))
         ws += WIN_STEP
+    if not scored:
+        return []
+    ABS_FLOOR = 3.0  # 绝对下限：低于此分视为垃圾，不剪
+    strict = [s for s in scored if s[2] >= KEEP_SCORE]
+    if len(strict) >= max_keep:
+        picked = strict
+    else:
+        # 按分数降序，全部 >= ABS_FLOOR 的都交给 NMS（它自己会取 top，不在这里预切片，
+        # 否则高分窗口互重叠时 NMS 去重后数量不足）
+        scored.sort(key=lambda x: -x[2])
+        picked = [s for s in scored if s[2] >= ABS_FLOOR]
+        if not picked:
+            picked = strict  # 兜底：不应发生（strict 为空才会进此分支）
+    cands = [(ws, we, sc, rs, None) for ws, we, sc, rs in picked]
     return nms(cands, max_keep)
 
 def snap_boundaries(ws, we, words):
@@ -385,9 +588,35 @@ def snap_boundaries(ws, we, words):
 
 # ---------------- 剪辑与投稿（沿用 v1） ----------------
 def clip(ts_path, cs, ce, out_path):
-    r = subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(cs), "-i", ts_path,
-                        "-t", str(ce - cs), "-c:v", "libx264", "-crf", "23",
-                        "-preset", "veryfast", "-c:a", "aac", out_path])
+    """剪辑 [cs, ce]：优先 -c copy（快且无损，切到关键帧），失败回退重编码。
+    任何失败返回 False（不抛异常，避免拖死整房间）。"""
+    dur = ce - cs
+    try:
+        # stream copy：-ss 放 -i 前快速定位；+faststart 方便本地预览
+        r = subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(cs), "-i", ts_path,
+                            "-t", str(dur), "-c", "copy", "-movflags", "+faststart",
+                            out_path], capture_output=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        log(f"  stream copy 超时，回退重编码")
+        r = None
+    if r is not None and r.returncode == 0 and os.path.exists(out_path) \
+            and os.path.getsize(out_path) > 10000:
+        return True
+    if r is not None:
+        err = r.stderr.decode(errors="replace")[:120]
+        log(f"  stream copy 失败（{err}），回退重编码")
+    try:
+        os.remove(out_path)
+    except OSError:
+        pass
+    try:
+        r = subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(cs), "-i", ts_path,
+                            "-t", str(dur), "-c:v", "libx264", "-crf", "23",
+                            "-preset", "veryfast", "-c:a", "aac", out_path],
+                           capture_output=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        log(f"  重编码剪辑超时，跳过该片段")
+        return False
     return r.returncode == 0 and os.path.exists(out_path)
 
 def _bili_season_headers():
@@ -516,12 +745,13 @@ def _add_to_season_after_upload(title, season_id, log=print):
 def upload(path, title, desc=None):
     import urllib.request
     passkey = BILILIVE_PASSKEY or json.load(open(BILILIVE_CONFIG))["passKey"]
+    room_url, pname = platform_room_url()
     payload = {"uid": UID, "videos": [path], "config": {
         "title": title,
-        "desc": desc or f"斗鱼房间 {ROOM_ID} 直播精彩片段（内容+弹幕双信号自动剪辑，仅自己可见）",
+        "desc": desc or f"{pname}房间 {ROOM_ID} 直播精彩片段（内容+弹幕双信号自动剪辑，仅自己可见）",
         "tag": ["精彩片段", "录播", "游戏直播"],
         "tid": 5, "copyright": 1,
-        "source": f"https://www.douyu.com/{ROOM_ID}",
+        "source": room_url,
         "dolby": 0, "hires": 0, "is_only_self": 1,
         "noReprint": 0, "closeDanmu": 0, "closeReply": 0, "no_disturbance": 1},
         "options": {"removeOriginAfterUploadCheck": True}}
@@ -700,11 +930,12 @@ def _build_desc(reasons):
 def process_room(room):
     """处理单个房间。"""
     global SEGDIR, ROOM_ID, STREAMER, STATE, WIN_SEC, WIN_STEP
-    global KEEP_SCORE, RETENTION_DAYS, _CUR_ROOM_ID
+    global KEEP_SCORE, RETENTION_DAYS, _CUR_ROOM_ID, PLATFORM
     global MIN_CLIP, MAX_CLIP
 
     rid = str(room.get("room_id", ""))
     _CUR_ROOM_ID = rid
+    PLATFORM = room.get("platform", "DouYu") or "DouYu"
     SEGDIR = room.get("segdir") or SEGDIR
     ROOM_ID = rid
     STREAMER = room.get("streamer") or STREAMER
@@ -730,7 +961,18 @@ def process_room(room):
 
     os.makedirs(WORKDIR, exist_ok=True)
     if os.path.exists(STATE):
-        state = json.load(open(STATE))
+        try:
+            with open(STATE) as f:
+                state = json.load(f)
+        except (json.JSONDecodeError, OSError, ValueError) as e:
+            # state 损坏：备份后用空 state 继续，避免房间永久跳过
+            bak = STATE + ".corrupt"
+            try:
+                os.replace(STATE, bak)
+            except OSError:
+                pass
+            log(f"  state 文件损坏已备份到 {os.path.basename(bak)}: {e}，用空状态继续")
+            state = {"processed": [], "uploaded": []}
     else:
         state = {"processed": [], "uploaded": []}
     processed = set(state.get("processed", []))
@@ -744,14 +986,16 @@ def process_room(room):
         if not DRY_RUN:
             state["processed"] = sorted(processed)
             state["processed_at"] = processed_at
-            json.dump(state, open(STATE, "w"))
+            with open(STATE, "w") as f:
+                json.dump(state, f)
 
     # 保留策略清理：删除处理完超过 N 天的 .ts/.xml
-    # 成品片段 .mp4 共用同一个保留天数参数
+    # 成品片段 .mp4 共用同一个保留天数参数（按主播名前缀过滤，不删别的房间的）
     if RETENTION_DAYS > 0 and not DRY_RUN:
         import time
         cutoff = time.time() - RETENTION_DAYS * 86400
-        for _mp4 in glob.glob(os.path.join(WORKDIR, "*_精彩_*.mp4")):
+        for _mp4 in glob.glob(os.path.join(
+                WORKDIR, f"{glob.escape(STREAMER)}_*_精彩_*.mp4")):
             try:
                 if os.path.getmtime(_mp4) < cutoff:
                     os.remove(_mp4)
@@ -829,10 +1073,11 @@ def process_room(room):
         if len(files) == 1:
             merged_tasks.append((files[0], files))
         else:
-            # ffmpeg 合并
-            merged = os.path.join(WORKDIR, f"merged_{bucket.strftime('%Y%m%d_%H%M')}.ts")
+            # ffmpeg 合并（文件名带房间隔离，防多房间同 bucket 冲突）
+            safe_rid = re.sub(r"[^\w\-.]", "_", rid)
+            merged = os.path.join(WORKDIR, f"merged_{safe_rid}_{bucket.strftime('%Y%m%d_%H%M')}.ts")
             if not os.path.exists(merged):
-                flist = os.path.join(WORKDIR, "merge_list.txt")
+                flist = os.path.join(WORKDIR, f"merge_list_{safe_rid}.txt")
                 with open(flist, "w") as f:
                     for fp in files:
                         f.write(f"file '{fp}'\n")
@@ -859,13 +1104,13 @@ def process_room(room):
 
         if TRANSCRIBE_OK:
             log("  转写中...")
-            words = transcribe_ts(ts_path)  # 内部分块缓存，未完成可续跑
+            words, energy = transcribe_ts(ts_path)  # 内部分块缓存，未完成可续跑
             log(f"  转写完成 {len(words)} 词")
         else:
-            words = []
+            words, energy = [], []
 
         if words:
-            cands = find_candidates(words, danmaku, max_keep=MAX_KEEP)
+            cands = find_candidates(words, danmaku, energy, max_keep=MAX_KEEP)
             # Phase 2: LLM 挑段（失败则跳过，用规则候选兜底）
             if "--no-llm" not in sys.argv and AI_ENABLED:
                 try:
@@ -895,22 +1140,36 @@ def process_room(room):
                 else:
                     cands.append((ws, we, sc, rs, tt))
         log(f"  候选 {len(cands)} 个")
+        upload_ok = True  # 有投稿失败时不标记 processed，下轮重试（cid 去重保证幂等）
         for ws, we, sc, rs, tt in cands:
             log(f"    [{ws:.0f},{we:.0f}] 分={sc:g} {'|'.join(rs)}" + (f" 标题:{tt}" if tt else ""))
 
         if DRY_RUN:
             continue
 
-        # 从录像文件名解析开播时间（"2026-09-30 12-05-17-265 ..."），用于片段标题
-        m = re.match(r"(\d{4}-\d{2}-\d{2}) (\d{2})-(\d{2})-(\d{2})", base)
-        rec_start = None
-        if m:
-            try:
-                rec_start = datetime.strptime(
-                    f"{m.group(1)} {m.group(2)}:{m.group(3)}:{m.group(4)}",
-                    "%Y-%m-%d %H:%M:%S").replace(tzinfo=cst)
-            except ValueError:
-                pass
+        # 从录像文件名解析开播时间，用于片段标题
+        # 单文件："2026-09-30 12-05-17-265 ..."；合并文件用首个分段的时间，取不到则用 bucket 时间
+        def _parse_rec_start(name):
+            m = re.match(r"(\d{4}-\d{2}-\d{2}) (\d{2})-(\d{2})-(\d{2})", name)
+            if m:
+                try:
+                    return datetime.strptime(
+                        f"{m.group(1)} {m.group(2)}:{m.group(3)}:{m.group(4)}",
+                        "%Y-%m-%d %H:%M:%S").replace(tzinfo=cst)
+                except ValueError:
+                    pass
+            m2 = re.search(r"merged_(?:.+_)?(\d{8})_(\d{4})", name)
+            if m2:
+                try:
+                    return datetime.strptime(
+                        m2.group(1) + m2.group(2), "%Y%m%d%H%M").replace(tzinfo=cst)
+                except ValueError:
+                    pass
+            return None
+        rec_start = _parse_rec_start(base)
+        if not rec_start and orig_files:
+            # 合并文件：用首个分段的真实开播时间（比 bucket 时间精确）
+            rec_start = _parse_rec_start(os.path.basename(orig_files[0]))
 
         for ws, we, sc, rs, tt in cands:
             cs, ce = snap_boundaries(ws, we, words) if words else (ws, we)
@@ -922,8 +1181,8 @@ def process_room(room):
                 continue
             # 简介：从选中原因提取观众看点（LLM 的 why / 规则版转人话）
             desc = _build_desc(rs)
-            # 加上直播间链接
-            room_url = f"https://www.douyu.com/{ROOM_ID}"
+            # 加上直播间链接（按平台生成）
+            room_url, _ = platform_room_url()
             desc = (desc + "\n" + room_url) if desc else room_url
             if rec_start:
                 clip_t = rec_start + timedelta(seconds=cs)
@@ -968,11 +1227,15 @@ def process_room(room):
                         log(f"  加合集失败: {e}")
             except Exception as e:
                 log(f"  投稿失败 {title}: {e}")
+                upload_ok = False
 
-        for _fp in orig_files:
-            processed.add(os.path.basename(_fp))
-        import time as _time
-        processed_at[base] = _time.time()
+        if upload_ok:
+            for _fp in orig_files:
+                processed.add(os.path.basename(_fp))
+            import time as _time
+            processed_at[base] = _time.time()
+        else:
+            log(f"  有投稿失败，{base} 下轮重试")
         # 录像保留策略由 RECORDING_RETENTION_DAYS 控制（0=永久保留）
         # 清理逻辑在 main() 开头统一执行
         save_state()
