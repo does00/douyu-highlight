@@ -23,6 +23,17 @@ HL_DIR = Path(os.environ.get("WORKDIR", str(BASE / "highlights")))
 ROOMS_CFG = BASE / "highlight-rooms.json"
 PORT = int(os.environ.get("PORT", "18022"))
 
+# 多平台配置：{providerId: (中文名, 房间链接模板, 房间号提取正则)}
+PLATFORMS = {
+    "DouYu":    ("斗鱼",   "https://www.douyu.com/{id}",      r"douyu\.com/(\d+)"),
+    "HuYa":     ("虎牙",   "https://www.huya.com/{id}",       r"huya\.com/([^/?#]+)"),
+    "DouYin":   ("抖音",   "https://live.douyin.com/{id}",    r"live\.douyin\.com/(\d+)"),
+    "TikTok":   ("TikTok", "https://www.tiktok.com/{id}/live", r"tiktok\.com/(@[^/?#]+)"),
+    "Bilibili": ("B站",    "https://live.bilibili.com/{id}",  r"live\.bilibili\.com/(\d+)"),
+}
+# 各平台默认清晰度（录制器 usedStream；不填则用录制器默认）
+PLATFORM_STREAM = {"DouYu": "蓝光4M"}
+
 
 def load_rooms():
     try:
@@ -142,10 +153,15 @@ label{display:inline-block;min-width:110px;color:#9fb2d8;font-size:13px}
 
 <div id="tab-rooms" class="tab active">
 <div class="card"><h2>房间列表</h2>
-<table><thead><tr><th>房间号</th><th>主播</th><th>流水线</th><th>录制器</th><th>合集ID</th><th>录像目录</th><th>管理</th></tr></thead>
+<table><thead><tr><th>平台</th><th>房间号</th><th>主播</th><th>流水线</th><th>录制器</th><th>合集ID</th><th>录像目录</th><th>管理</th></tr></thead>
 <tbody id="t_rooms"></tbody></table></div>
 <div class="card"><h2>添加房间</h2>
-<div class="form-row"><label>房间号</label><input id="nr_id" placeholder="6570336">
+<div class="form-row"><label>平台</label><select id="nr_platform">
+<option value="DouYu">斗鱼</option><option value="HuYa">虎牙</option>
+<option value="DouYin">抖音</option><option value="TikTok">TikTok</option>
+<option value="Bilibili">B站</option></select>
+<span class="hint">粘贴直播间链接可自动识别平台</span></div>
+<div class="form-row"><label>房间链接/号</label><input id="nr_id" style="width:300px" placeholder="粘贴直播间链接或填房间号" oninput="detectPlatform()">
 <button class="ok" onclick="addRoom()">添加</button>
 <span class="hint">主播名和录像目录自动获取</span></div>
 <div class="hint" id="msg_rooms"></div></div>
@@ -234,15 +250,23 @@ document.getElementById('t_logs').textContent=h.logs.slice().reverse().join('\\n
 }catch(e){document.getElementById('t_logs').textContent='加载失败：'+e.message;}}
 
 // 房间管理
+const PNAME={DouYu:'斗鱼',HuYa:'虎牙',DouYin:'抖音',TikTok:'TikTok',Bilibili:'B站',XHS:'小红书'};
+function detectPlatform(){const v=document.getElementById('nr_id').value.trim();
+const sel=document.getElementById('nr_platform');
+if(/douyu\.com\/(\d+)/i.test(v))sel.value='DouYu';
+else if(/huya\.com\/([^/?#]+)/i.test(v))sel.value='HuYa';
+else if(/live\.bilibili\.com\/(\d+)/i.test(v))sel.value='Bilibili';
+else if(/live\.douyin\.com\/(\d+)/i.test(v))sel.value='DouYin';
+else if(/tiktok\.com\/@([^/?#]+)/i.test(v))sel.value='TikTok';}
 function renderRooms(){const tb=document.getElementById('t_rooms');
-tb.innerHTML=G.rooms.map((r,i)=>'<tr><td>'+esc(r.room_id)+'</td><td>'+esc(r.streamer)+'</td>'+
+tb.innerHTML=G.rooms.map((r,i)=>'<tr><td>'+esc(PNAME[r.platform||'DouYu']||r.platform||'斗鱼')+'</td><td>'+esc(r.room_id)+'</td><td>'+esc(r.streamer)+'</td>'+
 '<td><button class="'+(r.enabled?'ok':'')+'" data-i="'+i+'" onclick="toggleRoomByIdx(this)" title="'+(r.enabled?'点击暂停流水线（只录像不处理）':'点击恢复流水线处理')+'">'+(r.enabled?'处理中':'已暂停')+'</button></td>'+
 '<td>'+(G.recorders&&G.recorders[r.room_id]?(G.recorders[r.room_id].recording?'<span class="badge ok">●录制中</span> <button data-i="'+i+'" onclick="stopRecorderByIdx(this)" title="暂停录制">⏸</button>':(G.recorders[r.room_id].live?'<span class="badge">直播中</span> <button data-i="'+i+'" onclick="startRecorderByIdx(this)" title="开始录制">▶</button> <button data-i="'+i+'" onclick="delRecorderByIdx(this)" title="删除录制器">删</button>':'<span class="hint" title="主播未开播，等待中">待机</span> <button data-i="'+i+'" onclick="delRecorderByIdx(this)" title="删除录制器（以后开播也不录）">删</button>')):'<button data-i="'+i+'" onclick="addRecorderByIdx(this)">+录制器</button>')+'</td>'+
 '<td><input id="season_'+i+'" style="width:80px" value="'+(r.season_id||'')+'" placeholder="合集ID"> '+
 '<button onclick="setSeason('+i+')">保存</button></td>'+
 '<td class="hint">'+esc(r.segdir||'')+'</td>'+
 '<td><button class="danger" onclick="delRoom('+i+')">删除</button></td></tr>').join('')
-||'<tr><td colspan="7" class="hint">暂无房间</td></tr>';}
+||'<tr><td colspan="8" class="hint">暂无房间</td></tr>';}
 async function setSeason(i){const el=document.getElementById('season_'+i);
 const v=el.value.trim();el.disabled=true;
 try{await api('/api/rooms',{method:'POST',
@@ -252,9 +276,10 @@ await loadStatus();renderRooms();
 }catch(e){el.style.borderColor='#f44336';}
 el.disabled=false;}
 async function addRoom(){const id=document.getElementById('nr_id').value.trim();
-if(!id){document.getElementById('msg_rooms').textContent='房间号必填';return;}
+const platform=document.getElementById('nr_platform').value;
+if(!id){document.getElementById('msg_rooms').textContent='房间链接/号必填';return;}
 document.getElementById('msg_rooms').textContent='获取主播信息中…';
-try{const r=await api('/api/rooms',{method:'POST',body:JSON.stringify({action:'add',room_id:id})});
+try{const r=await api('/api/rooms',{method:'POST',body:JSON.stringify({action:'add',room_id:id,platform})});
 document.getElementById('msg_rooms').textContent='已添加：'+r.streamer;
 document.getElementById('nr_id').value='';await loadStatus();renderRooms();
 }catch(e){document.getElementById('msg_rooms').textContent='失败：'+e.message;}}
@@ -367,10 +392,10 @@ if(!r||!confirm('暂停 '+r.streamer+' 的录制？录制器保留，下次开�
 try{await api('/api/recorder/stop',{method:'POST',body:JSON.stringify({room_id:r.room_id})});
 await loadStatus();renderRooms();}catch(e){alert('失败：'+e.message);}}
 async function addRecorderByIdx(btn){const i=+btn.dataset.i;const r=G.rooms[i];
-if(!r)return;addRecorder(r.room_id,r.streamer);}
-async function addRecorder(rid, streamer){
+if(!r)return;addRecorder(r.room_id,r.streamer,r.platform||'DouYu');}
+async function addRecorder(rid, streamer, platform){
 if(!confirm('给 '+streamer+'（'+rid+'）添加录制器？'))return;
-try{await api('/api/recorder',{method:'POST',body:JSON.stringify({room_id:rid,streamer})});
+try{await api('/api/recorder',{method:'POST',body:JSON.stringify({room_id:rid,streamer,platform:platform||'DouYu'})});
 await loadStatus();renderRooms();
 }catch(e){alert('失败：'+e.message);}}
 async function toggleRoomByIdx(btn){const i=+btn.dataset.i;
@@ -516,6 +541,42 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return None
 
+    @staticmethod
+    def _extract_room_id(platform, raw):
+        """从链接或纯房间号提取规范房间号（TikTok 保留 @ 前缀）。"""
+        import re
+        raw = (raw or "").strip()
+        pat = PLATFORMS.get(platform, (None, None, None))[2]
+        if pat:
+            m = re.search(pat, raw, re.I)
+            if m:
+                return m.group(1)
+        # 纯房间号 / @id 直接用
+        m = re.search(r"(@?[\w\-]+)$", raw)
+        return m.group(1) if m else raw
+
+    def _resolve_channel(self, platform, rid):
+        """调录制器 batchResolveChannel 解析，返回 {providerId,channelId,owner,channelURL}。"""
+        import urllib.request
+        tpl = PLATFORMS.get(platform, (None, None, None))[1]
+        if not tpl:
+            return None
+        url = tpl.format(id=rid)
+        try:
+            passkey = json.load(open(str(BASE / "config" / "appConfig.json")))["passKey"]
+            req = urllib.request.Request(
+                "http://127.0.0.1:18010/recorder/manager/batchResolveChannel",
+                data=json.dumps({"channelURLs": [url]}).encode(),
+                headers={"Content-Type": "application/json", "Authorization": passkey})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                d = json.load(r)
+            results = (d.get("payload") or {}).get("results") or d.get("results") or []
+            if results and results[0].get("success"):
+                return results[0].get("data") or {}
+            return None
+        except Exception:
+            return None
+
     def _handle_models(self):
         """GET /api/models：从 Gemini API 拉取可用模型列表。"""
         import urllib.request
@@ -638,23 +699,29 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": f"{type(e).__name__}: {e}"})
 
     def _handle_recorder(self):
-        """POST /api/recorder：给房间添加 bililive 录制器。"""
+        """POST /api/recorder：给房间添加 bililive 录制器（多平台）。"""
         import urllib.request
         body = self._read_json()
         rid = str(body.get("room_id", "")).strip()
         streamer = str(body.get("streamer", "")).strip()
+        platform = str(body.get("platform", "")).strip() or "DouYu"
+        if platform not in PLATFORMS:
+            platform = "DouYu"
         if not rid:
             return self._json({"error": "房间号必填"}, 400)
         try:
             passkey = json.load(open(str(BASE / "config" / "appConfig.json")))["passKey"]
+            cname, url_tpl, _ = PLATFORMS[platform]
             payload = {
-                "providerId": "DouYu", "channelId": rid,
+                "providerId": platform, "channelId": rid,
                 "remarks": f"{streamer}-{rid}" if streamer else rid,
-                "channelURL": f"https://www.douyu.com/{rid}",
-                "usedSource": "ws", "usedStream": "蓝光4M",
+                "channelURL": url_tpl.format(id=rid),
+                "usedSource": "ws",
                 "recorderType": "ffmpeg", "proxy": "http://198.19.0.1:3128",
                 "noGlobalFollowFields": ["recorderType", "proxy"], "autoRecord": True,
             }
+            if platform in PLATFORM_STREAM:
+                payload["usedStream"] = PLATFORM_STREAM[platform]
             req = urllib.request.Request(
                 "http://127.0.0.1:18010/recorder/add",
                 data=json.dumps(payload).encode(),
@@ -742,18 +809,32 @@ class Handler(BaseHTTPRequestHandler):
         cfg = load_rooms()
         action = body.get("action")
         if action == "add":
-            rid = str(body.get("room_id", "")).strip()
+            raw = str(body.get("room_id", "")).strip()
+            platform = str(body.get("platform", "")).strip() or "DouYu"
+            if platform not in PLATFORMS:
+                platform = "DouYu"
+            cname = PLATFORMS[platform][0]
+            rid = self._extract_room_id(platform, raw)
             if not rid:
                 return self._json({"error": "房间号必填"}, 400)
-            if any(r.get("room_id") == rid for r in cfg["rooms"]):
+            if any(r.get("room_id") == rid and r.get("platform", "DouYu") == platform
+                   for r in cfg["rooms"]):
                 return self._json({"error": "房间已存在"}, 400)
-            # 自动获取主播名
-            st = self._fetch_streamer(rid)
+            # 解析主播名：先走录制器 resolve，斗鱼失败时回退 betard
+            st = None
+            info = self._resolve_channel(platform, rid)
+            if info:
+                st = (info.get("owner") or "").strip() or None
+                # 用解析出的规范 channelId
+                if info.get("channelId"):
+                    rid = str(info["channelId"]).strip()
+            if not st and platform == "DouYu":
+                st = self._fetch_streamer(rid)
             if not st:
-                return self._json({"error": "获取主播名失败，请检查房间号"}, 400)
-            segdir = os.path.join(os.environ.get("RECORD_BASE", "/home/hatch/Downloads"), "斗鱼", st)
+                return self._json({"error": "获取主播名失败，请检查链接/房间号"}, 400)
+            segdir = os.path.join(os.environ.get("RECORD_BASE", "/home/hatch/Downloads"), cname, st)
             cfg["rooms"].append({
-                "room_id": rid, "streamer": st, "enabled": True,
+                "room_id": rid, "platform": platform, "streamer": st, "enabled": True,
                 "segdir": segdir,
                 "clip": {"win_sec": 180, "win_step": 60, "keep_score": 10,
                          "max_keep": 3, "retention_days": 1,
