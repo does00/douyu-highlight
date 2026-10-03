@@ -860,8 +860,8 @@ def _configure_llm(room):
     pv = g.get("provider", "deepseek")
     L.LLM_PROVIDER = pv
     # 模型按 provider 校验（防止存的是别的 provider 的模型名）
-    valid_ds = ("deepseek-chat", "deepseek-flash", "deepseek-v4-pro",
-                "deepseek-reasoner")
+    # 注意：deepseek-flash 实测返回空内容（API 不报错），已从合法列表移除
+    valid_ds = ("deepseek-chat", "deepseek-reasoner")
     valid_gm = ("gemini-3-flash-preview", "gemini-2.0-flash",
                 "gemini-1.5-flash", "gemini-1.5-pro")
     m = g.get("model", "")
@@ -1038,63 +1038,8 @@ def process_room(room):
             json.dump(state, open(STATE, "w"))
         return
 
-    # 按 30 分钟窗口分组，合并连续的 5 分钟文件
-    from collections import defaultdict
-    def _ts_time(fn):
-        import re
-        m = re.search(r"(\d{4}-\d{2}-\d{2}) (\d{2})-(\d{2})-(\d{2})", fn)
-        if not m:
-            return None
-        from datetime import datetime
-        return datetime.strptime(f"{m.group(1)} {m.group(2)}:{m.group(3)}:{m.group(4)}",
-                                 "%Y-%m-%d %H:%M:%S")
-    buckets = defaultdict(list)
-    for p in tss:
-        tm = _ts_time(os.path.basename(p))
-        if not tm:
-            buckets["nogroup"].append(p)
-            continue
-        # 按 30 分钟向下取整
-        bucket = tm.replace(minute=(tm.minute // 30) * 30, second=0, microsecond=0)
-        buckets[bucket].append(p)
-    # 只处理"完整"的桶：满 6 个文件，或桶时间已过去 40 分钟（不会再有新文件）
-    merged_tasks = []  # [(merged_ts, [original_paths])]
-    for bucket, files in sorted(buckets.items()):
-        if bucket == "nogroup":
-            for p in files:
-                merged_tasks.append((p, [p]))
-            continue
-        files = sorted(files)
-        bucket_end = bucket.timestamp() + 1800
-        is_complete = len(files) >= 6 or now > bucket_end + 2400
-        if not is_complete:
-            log(f" 桶 {bucket.strftime('%H:%M')} 只有 {len(files)} 个文件，等待更多")
-            continue  # 不标记为已处理，下次再来
-        if len(files) == 1:
-            merged_tasks.append((files[0], files))
-        else:
-            # ffmpeg 合并（文件名带房间隔离，防多房间同 bucket 冲突）
-            safe_rid = re.sub(r"[^\w\-.]", "_", rid)
-            merged = os.path.join(WORKDIR, f"merged_{safe_rid}_{bucket.strftime('%Y%m%d_%H%M')}.ts")
-            if not os.path.exists(merged):
-                flist = os.path.join(WORKDIR, f"merge_list_{safe_rid}.txt")
-                with open(flist, "w") as f:
-                    for fp in files:
-                        f.write(f"file '{fp}'\n")
-                r = subprocess.run(
-                    ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                     "-i", flist, "-c", "copy", merged],
-                    capture_output=True, timeout=300)
-                if r.returncode != 0 or not os.path.exists(merged):
-                    log(f"  合并失败，逐个处理")
-                    for p in files:
-                        merged_tasks.append((p, [p]))
-                    continue
-                log(f"  合并 {len(files)} 个文件 -> {os.path.basename(merged)}")
-            # 合并弹幕 XML（时间偏移累加）
-            _merge_xml(files, merged[:-3] + ".xml")
-            merged_tasks.append((merged, files))
-
+    # 文件已是90分钟一段，直接逐个处理（无需合并）
+    merged_tasks = [(p, [p]) for p in tss]
     for ts_path, orig_files in merged_tasks:
         base = os.path.basename(ts_path)
         log(f"处理 {base[:30]} ({ts_duration(ts_path):.0f}s)")
@@ -1110,8 +1055,8 @@ def process_room(room):
             words, energy = [], []
 
         if words:
-            cands = find_candidates(words, danmaku, energy, max_keep=MAX_KEEP)
-            # Phase 2: LLM 挑段（失败则跳过，用规则候选兜底）
+            # 只用 LLM 挑段（用户要求：禁用规则选）
+            cands = []
             if "--no-llm" not in sys.argv and AI_ENABLED:
                 try:
                     L = _configure_llm(room)
@@ -1120,7 +1065,7 @@ def process_room(room):
                         log(f"  LLM 挑选中 [{L.LLM_PROVIDER}/{L.LLM_MODEL}]...")
                         llm_cands = pick_highlights_llm(words, danmaku, log=log)
                         log(f"  LLM 候选 {len(llm_cands)} 个")
-                        cands = nms(cands + llm_cands, max_keep=MAX_KEEP)  # 融合去重（LLM 基分 20，优先）
+                        cands = nms(llm_cands, max_keep=MAX_KEEP)
                     else:
                         log("  LLM 不可用，跳过")
                 except Exception as e:
