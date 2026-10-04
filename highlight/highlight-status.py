@@ -140,16 +140,11 @@ label{display:inline-block;min-width:110px;color:#9fb2d8;font-size:13px}
 .tabs{display:flex;gap:4px;margin-bottom:12px}
 .tabs button{background:#182032;border:1px solid #26314a;border-radius:8px 8px 0 0;padding:8px 20px}
 .tabs button.active{background:#2b3a5e;border-bottom:2px solid #5e8bff}
-.tab{display:none}.tab.active{display:block}
+.tab{display:block;margin-bottom:20px}
 .form-row{margin:8px 0}
 </style></head><body>
 <h1>🎬 精彩片段流水线</h1>
-<div class="tabs">
-<button class="active" onclick="showTab('rooms')">🏠 房间管理</button>
-<button onclick="showTab('clips')">✂️ 剪辑管理</button>
-<button onclick="showTab('ai')">🤖 AI 配置</button>
-<button onclick="showTab('status')">📊 状态</button>
-</div>
+<div class="tabs" style="display:none"></div>
 
 <div id="tab-rooms" class="tab active">
 <div class="card"><h2>房间列表</h2>
@@ -162,8 +157,9 @@ label{display:inline-block;min-width:110px;color:#9fb2d8;font-size:13px}
 <option value="Bilibili">B站</option></select>
 <span class="hint">粘贴直播间链接可自动识别平台</span></div>
 <div class="form-row"><label>房间链接/号</label><input id="nr_id" style="width:300px" placeholder="粘贴直播间链接或填房间号" oninput="detectPlatform()">
+<label style="margin-left:12px">主播名</label><input id="nr_streamer" style="width:150px" placeholder="选填，跳过自动获取">
 <button class="ok" onclick="addRoom()">添加</button>
-<span class="hint">主播名和录像目录自动获取</span></div>
+<span class="hint">主播名留空则自动获取</span></div>
 <div class="hint" id="msg_rooms"></div></div>
 </div>
 
@@ -195,6 +191,10 @@ label{display:inline-block;min-width:110px;color:#9fb2d8;font-size:13px}
 <div class="form-row"><button class="ok" onclick="saveBili()">保存</button>
 <span class="hint" id="msg_bili"></span></div>
 <div class="hint">合集 ID 在房间管理里按房间配置（season_id）</div></div>
+<div class="card"><h2>按房间 AI 开关</h2>
+<table><thead><tr><th>房间</th><th>主播</th><th>AI 标题</th><th>操作</th></tr></thead>
+<tbody id="t_ai_rooms"></tbody></table>
+<div class="hint" id="msg_ai"></div></div>
 <div class="card"><h2>QQ 投稿通知（AstrBot）</h2>
 <div class="form-row"><label>AstrBot 地址</label><input id="nt_url" style="width:320px" placeholder="http://IP:6185"></div>
 <div class="form-row"><label>API Key</label><input id="nt_key" type="password" style="width:320px" placeholder="im 权限的 API Key，留空不修改"></div>
@@ -205,11 +205,6 @@ label{display:inline-block;min-width:110px;color:#9fb2d8;font-size:13px}
 <button onclick="testNotify()">🔔 发送测试消息</button>
 <span class="hint" id="msg_notify"></span></div>
 <div class="hint">投稿成功后经 AstrBot OpenAPI 发 QQ 私聊通知</div></div>
-<div class="card"><h2>按房间 AI 开关</h2>
-<table><thead><tr><th>房间</th><th>主播</th><th>AI 标题</th><th>操作</th></tr></thead>
-<tbody id="t_ai_rooms"></tbody></table>
-<div class="hint" id="msg_ai"></div></div>
-</div>
 
 <div id="tab-status" class="tab">
 <div class="card"><span class="badge" id="b_run">…</span><span class="badge" id="b_cnt">…</span>
@@ -223,14 +218,15 @@ label{display:inline-block;min-width:110px;color:#9fb2d8;font-size:13px}
 <tbody id="t_clips"><tr><td colspan="2" class="hint">加载中…</td></tr></tbody></table></div></div>
 <div class="card"><h2>运行日志</h2><div class="logs" id="t_logs">加载中…</div></div>
 </div>
+<div style='text-align:center;color:#666;font-size:12px;padding:10px'>v20261003-1628</div>
 
 <script>
 let G={rooms:[],ai_global:{}};
 const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
-function showTab(n){document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+function showTab(n,el){document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
 document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));
 document.getElementById('tab-'+n).classList.add('active');
-event.target.classList.add('active');
+if(el)el.classList.add('active');
 if(n==='rooms')renderRooms();if(n==='clips')initClipTab();if(n==='ai')renderAI();}
 async function api(p,o={}){const r=await fetch(p,Object.assign({headers:{'Content-Type':'application/json'}},o));
 const j=await r.json();if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j;}
@@ -279,11 +275,12 @@ await loadStatus();renderRooms();
 el.disabled=false;}
 async function addRoom(){const id=document.getElementById('nr_id').value.trim();
 const platform=document.getElementById('nr_platform').value;
+const streamer=document.getElementById('nr_streamer').value.trim();
 if(!id){document.getElementById('msg_rooms').textContent='房间链接/号必填';return;}
-document.getElementById('msg_rooms').textContent='获取主播信息中…';
-try{const r=await api('/api/rooms',{method:'POST',body:JSON.stringify({action:'add',room_id:id,platform})});
+document.getElementById('msg_rooms').textContent=streamer?'添加中…':'获取主播信息中…';
+try{const r=await api('/api/rooms',{method:'POST',body:JSON.stringify({action:'add',room_id:id,platform,streamer})});
 document.getElementById('msg_rooms').textContent='已添加：'+r.streamer;
-document.getElementById('nr_id').value='';await loadStatus();renderRooms();
+document.getElementById('nr_id').value='';document.getElementById('nr_streamer').value='';await loadStatus();renderRooms();
 }catch(e){document.getElementById('msg_rooms').textContent='失败：'+e.message;}}
 async function toggleRoom(i){try{await api('/api/rooms',{method:'POST',
 body:JSON.stringify({action:'toggle',index:i})});await loadStatus();renderRooms();}catch(e){}}
@@ -414,7 +411,7 @@ if(r.ok){el.textContent='✅ 通畅['+r.mode+']，延迟 '+r.latency_ms+'ms，�
 else{el.textContent='❌ 失败（'+r.latency_ms+'ms）：'+r.error;el.className='hint';}
 }catch(e){el.textContent='❌ 请求失败：'+e.message;}}
 
-loadStatus().then(()=>renderRooms());setInterval(loadStatus,60000);
+loadStatus().then(()=>{renderRooms();initClipTab();renderAI();});setInterval(loadStatus,60000);
 </script></body></html>"""
 
 
@@ -466,6 +463,26 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def _check_auth(self):
+        """HTTP Basic 认证。密码从环境变量 HIGHLIGHT_AUTH 或 WEBUI_PASSWORD 读，默认 highlight。"""
+        import os, base64
+        expected = os.environ.get("HIGHLIGHT_AUTH") or os.environ.get("WEBUI_PASSWORD") or "highlight"
+        auth = self.headers.get("Authorization", "")
+        if not auth.startswith("Basic "):
+            return False
+        try:
+            decoded = base64.b64decode(auth[6:]).decode()
+            _, pwd = decoded.split(":", 1)
+            return pwd == expected
+        except Exception:
+            return False
+
+    def _require_auth(self):
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="highlight"')
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
@@ -479,6 +496,9 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(ln) or b"{}")
 
     def do_GET(self):
+        if not self._check_auth():
+            self._require_auth()
+            return
         try:
             path = urlparse(self.path).path
             if path == "/api/status":
@@ -500,6 +520,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": f"{type(e).__name__}: {e}"}, 500)
 
     def do_POST(self):
+        if not self._check_auth():
+            self._require_auth()
+            return
         path = urlparse(self.path).path
         try:
             if path == "/api/rooms":
@@ -825,9 +848,9 @@ class Handler(BaseHTTPRequestHandler):
             if any(r.get("room_id") == rid and r.get("platform", "DouYu") == platform
                    for r in cfg["rooms"]):
                 return self._json({"error": "房间已存在"}, 400)
-            # 解析主播名：先走录制器 resolve，斗鱼失败时回退 betard
-            st = None
-            info = self._resolve_channel(platform, rid)
+            # 解析主播名：手动填的优先，否则走录制器 resolve，斗鱼失败时回退 betard
+            st = str(body.get("streamer", "")).strip() or None
+            info = None if st else self._resolve_channel(platform, rid)
             if info:
                 st = (info.get("owner") or "").strip() or None
                 # 用解析出的规范 channelId
