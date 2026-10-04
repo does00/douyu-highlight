@@ -1208,7 +1208,54 @@ def main():
             log(f"房间 {rid} 处理异常，跳过: {type(e).__name__}: {e}")
             import traceback
             log(traceback.format_exc()[-500:])
+    # 孤儿目录清理：房间已删除但文件残留的，按保留期清理
+    try:
+        cleanup_orphan_segdirs(rooms)
+    except Exception as e:
+        log(f"孤儿目录清理异常: {e}")
     log("全部房间处理完成")
+
+
+def cleanup_orphan_segdirs(rooms, log=print):
+    """清理已删除房间的残留录像目录（所有平台）。"""
+    import time
+    base = "/home/hatch/Downloads"
+    if not os.path.isdir(base):
+        return
+    # 当前房间的主播目录名集合（取 segdir 的 basename）
+    active = set()
+    for r in rooms:
+        sd = r.get("segdir")
+        if sd:
+            active.add(os.path.basename(os.path.normpath(sd)))
+    retention = 1  # 天，和房间保留期一致
+    cutoff = time.time() - retention * 86400
+    for plat in os.listdir(base):
+        pdir = os.path.join(base, plat)
+        if not os.path.isdir(pdir):
+            continue
+        for name in os.listdir(pdir):
+            if name in active:
+                continue
+            d = os.path.join(pdir, name)
+            if not os.path.isdir(d):
+                continue
+            for fn in os.listdir(d):
+                if not (fn.endswith(".ts") or fn.endswith(".xml") or fn.endswith(".mp4") or fn.endswith(".flv")):
+                    continue
+                fp = os.path.join(d, fn)
+                try:
+                    if os.path.getmtime(fp) < cutoff:
+                        os.remove(fp)
+                        log(f"  孤儿目录清理: {plat}/{name}/{fn}")
+                except OSError:
+                    pass
+            try:
+                if not os.listdir(d):
+                    os.rmdir(d)
+                    log(f"  孤儿空目录删除: {plat}/{name}")
+            except OSError:
+                pass
 
 if __name__ == "__main__":
     # 单实例锁（沿用 v1）
