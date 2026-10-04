@@ -21,8 +21,8 @@ import urllib.error
 
 BOT_ENV = os.environ.get("BOT_ENV", "/home/hatch/workspace/douyu-ai-bot/.env")
 CHUNK_SEC = 600
-LLM_MIN_CLIP = 30.0
-LLM_MAX_CLIP = 300.0
+LLM_MIN_CLIP = 180.0
+LLM_MAX_CLIP = 600.0
 LLM_TIMEOUT = 60
 CHUNK_DELAY = 6.0
 
@@ -214,6 +214,33 @@ def _extract_json_array(text):
     return out
 
 
+def _get_clip_range():
+    """从 highlight-rooms.json 读当前房间的 min/max_clip（取第一个启用的房间）。"""
+    try:
+        import json as _json, os as _os
+        cfg_path = _os.path.join(_os.path.dirname(__file__), "highlight-rooms.json")
+        cfg = _json.load(open(cfg_path))
+        for r in cfg.get("rooms", []):
+            if r.get("enabled", True):
+                clip = r.get("clip", {})
+                mn = int(clip.get("min_clip", 180))
+                mx = int(clip.get("max_clip", 600))
+                return mn, mx
+    except Exception:
+        pass
+    return int(LLM_MIN_CLIP), int(LLM_MAX_CLIP)
+
+def _get_custom_prompt():
+    """从 highlight-rooms.json 读用户自定义提示词（AI配置页）。"""
+    try:
+        import json as _json, os as _os
+        cfg_path = _os.path.join(_os.path.dirname(__file__), "highlight-rooms.json")
+        cfg = _json.load(open(cfg_path))
+        p = (cfg.get("ai_global", {}) or {}).get("prompt", "")
+        return p.strip() if p else ""
+    except Exception:
+        return ""
+
 def build_discover_prompt(chunk_words, chunk_danmaku):
     lines, cur, acc = [], None, []
     for t, tok in chunk_words:
@@ -230,13 +257,28 @@ def build_discover_prompt(chunk_words, chunk_danmaku):
     dm = "\n".join("[%s] %s" % (_fmt_ts(t), x)
                    for t, _, x in chunk_danmaku[:40])
     if LLM_PROVIDER == "deepseek":
-        dur_str = f"{int(LLM_MIN_CLIP)}-{int(LLM_MAX_CLIP)}"
+        mn, mx = _get_clip_range()
+        dur_str = f"{mn}-{mx}"
+        # 固定前缀
+        FIXED_PREFIX = ("你是一个游戏直播精彩片段剪辑师，眼光毒辣，宁缺毋滥。"
+                        "下面是直播的语音转写（含时间戳）和同期弹幕。入选标准如下\n")
+        custom = _get_custom_prompt()
+        if custom:
+            return (
+                FIXED_PREFIX + custom + "\n[转写]\n" + transcript +
+                "\n[弹幕]\n" + (dm if dm else "(无)") +
+                "\n只返回 JSON 数组，不要解释，不要 markdown：\n"
+                '[{"s":45,"e":135,"title":"标题不超过12字","why":"一句话理由"}]\n'
+                f"要求：s/e 为相对本段起始的秒数；每段 {dur_str} 秒；"
+                "时间必须落在有语音的区间；弹幕爆发可作参考但别只看弹幕。"
+            )
         return (
             "你是一个游戏直播精彩片段剪辑师。下面是某主播约10分钟直播的语音转写（含时间戳）"
             "和同期弹幕。\n"
             "[转写]\n" + transcript +
             "\n[弹幕]\n" + (dm if dm else "(无)") +
-            "\n请挑选 0-2 个最精彩的片段（高能操作、爆笑时刻、金句、神反转等）。"
+            "\n请挑选 0-2 个最精彩的片段。标准要严：必须是高能操作、爆笑名场面、神反转、情绪大爆发这种让观众忍不住看完的时刻。"
+            "日常唠嗑、碎碎念、纠结选啥、算数、闲聊一律不要选，宁可返回空数组也别凑数。"
             "只返回 JSON 数组，不要解释，不要 markdown：\n"
             '[{"s":45,"e":135,"title":"标题不超过12字","why":"一句话理由"}]\n'
             f"要求：s/e 为相对本段起始的秒数；每段 {dur_str} 秒；"
@@ -287,7 +329,8 @@ def pick_highlights_llm(words, danmaku, log=print):
                 s, e = float(c["s"]), float(c["e"])
             except (TypeError, ValueError, KeyError):
                 continue
-            if not (0 <= s < e <= CHUNK_SEC and LLM_MIN_CLIP <= e - s <= LLM_MAX_CLIP):
+            mn, mx = _get_clip_range()
+            if not (0 <= s < e <= CHUNK_SEC and mn <= e - s <= mx):
                 continue
             ws, we = off + s, off + e
             # 防幻觉：时间段内必须有足够语音
