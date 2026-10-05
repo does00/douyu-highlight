@@ -53,6 +53,10 @@ def _load_relay():
 RELAY_URL, RELAY_TOKEN = _load_relay()
 LLM_OK = bool(RELAY_TOKEN)
 
+# 手动选段模式：1=跳过 LLM，存队列等人工选
+MANUAL_MODE = os.environ.get("HIGHLIGHT_MANUAL", "0") == "1"
+QUEUE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "queue")
+
 # 直连模式：NAS 部署用
 # Provider 二选一：deepseek（默认）或 gemini
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "deepseek").strip().lower()
@@ -133,23 +137,6 @@ def _fmt_ts(sec):
     return "%02d:%02d" % (int(sec // 60), int(sec % 60))
 
 
-def _call_llm(prompt, system="x", max_tokens=800, retries=3):
-    """统一入口：直连模式（deepseek/gemini）优先，否则走中继（本机）。"""
-    if USE_DIRECT:
-        fn = _call_deepseek if LLM_PROVIDER == "deepseek" else _call_direct
-        last_err = None
-        for attempt in range(retries):
-            try:
-                return fn(prompt, max_tokens)
-            except Exception as e:
-                last_err = e
-                if attempt < retries - 1:
-                    time.sleep(5 * (attempt + 1))
-                    continue
-                raise
-        raise last_err
-    return _call_relay(prompt, system, max_tokens, retries)
-
 
 def _call_relay(prompt, system="x", max_tokens=800, retries=3):
     body = json.dumps({
@@ -187,32 +174,6 @@ def _call_relay(prompt, system="x", max_tokens=800, retries=3):
     raise last_err
 
 
-def _extract_json_array(text):
-    """提取 JSON 数组；截断时抢救完整对象。"""
-    # 先找完整的 [...]，找不到则从第一个 [ 开始截断抢救
-    m = re.search(r"(\[.*\])", text, re.S)
-    blob = m.group(1) if m else None
-    if not blob:
-        i = text.find("[")
-        blob = text[i:] if i >= 0 else None
-    if not blob:
-        return []
-    try:
-        d = json.loads(blob)
-        return d if isinstance(d, list) else []
-    except Exception:
-        pass
-    # 截断抢救：逐个提取完整 {...}
-    out = []
-    for om in re.finditer(r"\{[^{}]*\}", blob):
-        try:
-            d = json.loads(om.group(0))
-            if isinstance(d, dict):
-                out.append(d)
-        except Exception:
-            continue
-    return out
-
 
 def _get_clip_range():
     """从 highlight-rooms.json 读当前房间的 min/max_clip（取第一个启用的房间）。"""
@@ -241,62 +202,13 @@ def _get_custom_prompt():
     except Exception:
         return ""
 
-def build_discover_prompt(chunk_words, chunk_danmaku):
-    lines, cur, acc = [], None, []
-    for t, tok in chunk_words:
-        b = int(t // 15) * 15
-        if cur is None:
-            cur = b
-        if b != cur:
-            lines.append("[%s] %s" % (_fmt_ts(cur), "".join(acc)))
-            cur, acc = b, []
-        acc.append(tok)
-    if acc:
-        lines.append("[%s] %s" % (_fmt_ts(cur), "".join(acc)))
-    transcript = "\n".join(lines)
-    dm = "\n".join("[%s] %s" % (_fmt_ts(t), x)
-                   for t, _, x in chunk_danmaku[:40])
-    if LLM_PROVIDER == "deepseek":
-        mn, mx = _get_clip_range()
-        dur_str = f"{mn}-{mx}"
-        # 固定前缀
-        FIXED_PREFIX = ("你是一个游戏直播精彩片段剪辑师，眼光毒辣，宁缺毋滥。"
-                        "下面是直播的语音转写（含时间戳）和同期弹幕。入选标准如下\n")
-        custom = _get_custom_prompt()
-        if custom:
-            return (
-                FIXED_PREFIX + custom + "\n[转写]\n" + transcript +
-                "\n[弹幕]\n" + (dm if dm else "(无)") +
-                "\n只返回 JSON 数组，不要解释，不要 markdown：\n"
-                '[{"s":45,"e":135,"title":"标题不超过12字","why":"一句话理由"}]\n'
-                f"要求：s/e 为相对本段起始的秒数；每段 {dur_str} 秒；"
-                "时间必须落在有语音的区间；弹幕爆发可作参考但别只看弹幕。"
-            )
-        return (
-            "你是一个游戏直播精彩片段剪辑师。下面是某主播约10分钟直播的语音转写（含时间戳）"
-            "和同期弹幕。\n"
-            "[转写]\n" + transcript +
-            "\n[弹幕]\n" + (dm if dm else "(无)") +
-            "\n请挑选 0-2 个最精彩的片段。标准要严：必须是高能操作、爆笑名场面、神反转、情绪大爆发这种让观众忍不住看完的时刻。"
-            "日常唠嗑、碎碎念、纠结选啥、算数、闲聊一律不要选，宁可返回空数组也别凑数。"
-            "只返回 JSON 数组，不要解释，不要 markdown：\n"
-            '[{"s":45,"e":135,"title":"标题不超过12字","why":"一句话理由"}]\n'
-            f"要求：s/e 为相对本段起始的秒数；每段 {dur_str} 秒；"
-            "时间必须落在有语音的区间；弹幕爆发可作参考但别只看弹幕。"
-        )
-    return (
-        "Douyu game livestream transcript (timestamps) + danmaku below.\n"
-        "[TRANSCRIPT]\n" + transcript +
-        "\n[DANMAKU]\n" + (dm if dm else "(none)") +
-        "\nPick 0-2 highlight clips (epic/funny/quotes). "
-        "Reply ONLY compact JSON like [{\"s\":45,\"e\":135}]. "
-        "s/e=seconds from chunk start, clip 30-180s. "
-        "No markdown, no explanation."
-    )
 
-
-def pick_highlights_llm(words, danmaku, log=print):
-    """LLM 发现阶段。返回 [(ws, we, score, reasons, None)]（标题后续单独生成）。"""
+def pick_highlights_llm(words, danmaku, log=print, room_id="", streamer="", ts_path="", session_base=0):
+    """LLM 发现阶段。返回 [(ws, we, score, reasons, None)]（标题后续单独生成）。
+    MANUAL_MODE=1 时存队列等人工选，返回 []。"""
+    if MANUAL_MODE:
+        _save_to_queue(words, danmaku, room_id, streamer, log, ts_path, session_base)
+        return []
     if not LLM_OK:
         log("LLM unavailable, skipping")
         return []
@@ -398,3 +310,46 @@ def generate_title_and_desc(excerpt, log=print):
     中继不支持长输出，简介用固定模板。返回 (title, None)。"""
     title = generate_title(excerpt, log=log)
     return title, None
+
+
+def _save_to_queue(words, danmaku, room_id, streamer, log=print, ts_path="", session_base=0):
+    """手动模式：把转写+弹幕存到队列，等人工选段。
+    ts_path: 对应的录像文件；session_base: chunk offset 对应 ts 内的绝对偏移。"""
+    import time, json
+    pend = os.path.join(QUEUE_DIR, "pending")
+    os.makedirs(pend, exist_ok=True)
+    # 10分钟分块存
+    dur = words[-1][0] if words else 0
+    off = 0.0
+    idx = 0
+    saved = 0
+    while off < dur:
+        ce = min(off + 600, dur)
+        cw = [(t - off, tok) for t, tok in words if off <= t < ce]
+        chunk_text = "".join(tok for _, tok in cw)
+        if len(chunk_text) >= 100:
+            cdm = [(t - off, u, x) for t, u, _, x in danmaku if off - 20 <= t < ce]
+            # 转写文本带时间戳（每30秒一个标记）
+            lines = []
+            cur_mark = -1
+            for t_rel, tok in cw:
+                mark = int(t_rel // 30) * 30
+                if mark != cur_mark:
+                    lines.append(f"\n[{mark//60:02d}:{mark%60:02d}] ")
+                    cur_mark = mark
+                lines.append(tok)
+            fn = f"{room_id}_{int(time.time())}_{idx}.json"
+            data = {
+                "room_id": room_id, "streamer": streamer,
+                "chunk_idx": idx, "offset": off,
+                "ts_path": ts_path, "session_base": session_base,
+                "text": "".join(lines),
+                "words": [[round(t, 2), tok] for t, tok in cw],
+                "danmaku": [{"t": round(t, 1), "user": u, "text": x} for t, u, x in cdm[:200]],
+            }
+            with open(os.path.join(pend, fn), "w") as f:
+                json.dump(data, f, ensure_ascii=False)
+            saved += 1
+        off += 600
+        idx += 1
+    log(f"手动模式：已存 {saved} 个待选块到队列")
