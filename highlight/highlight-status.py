@@ -590,7 +590,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _resolve_channel(self, platform, rid):
         """调录制器 batchResolveChannel 解析，返回 {providerId,channelId,owner,channelURL}。"""
-        import urllib.request
+        import urllib.request, os
+        # 检查 biliLive 录制器是否部署
+        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "appConfig.json")
+        if not os.path.exists(cfg_path):
+            raise RuntimeError("本机未部署 biliLive 录制器（config/appConfig.json 不存在）。"
+                "录制相关操作不可用；加房间请直接改 highlight-rooms.json 的 segdir 指向录像目录。")
         tpl = PLATFORMS.get(platform, (None, None, None))[1]
         if not tpl:
             return None
@@ -856,7 +861,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "房间已存在"}, 400)
             # 解析主播名：手动填的优先，否则走录制器 resolve，斗鱼失败时回退 betard
             st = str(body.get("streamer", "")).strip() or None
-            info = None if st else self._resolve_channel(platform, rid)
+            try:
+                info = None if st else self._resolve_channel(platform, rid)
+            except RuntimeError as e:
+                return self._json({"error": str(e)}, 400)
             if info:
                 st = (info.get("owner") or "").strip() or None
                 # 用解析出的规范 channelId
