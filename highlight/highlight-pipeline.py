@@ -61,8 +61,9 @@ def platform_room_url(platform=None, rid=None):
 # 多房间配置（WebUI 管理）
 ROOMS_CONFIG = os.environ.get("ROOMS_CONFIG",
     "/home/hatch/workspace/bililive-cli/highlight-rooms.json")
-# 录像保留策略：0=永久保留（默认），N=处理完 N 天后删除 .ts/.xml
-RETENTION_DAYS = int(os.environ.get("RECORDING_RETENTION_DAYS", "0"))
+# 录像保留策略：0=永久保留（默认），N=处理完 N 小时后删除 .ts/.xml
+RETENTION_HOURS = int(os.environ.get("RECORDING_RETENTION_HOURS",
+    int(os.environ.get("RECORDING_RETENTION_DAYS", "0")) * 24))
 
 DRY_RUN = "--dry-run" in sys.argv
 NO_TRANSCRIBE = "--no-transcribe" in sys.argv
@@ -531,45 +532,6 @@ def nms(cands, max_keep=6):
     kept.sort()
     return kept
 
-def find_candidates(words, danmaku, energy=None, max_keep=6):
-    """滑动窗口打分 + 自适应阈值 + 非极大值抑制。
-    返回 [(ws, we, score, reasons, title)]（按时间排序）。
-    自适应：先按 KEEP_SCORE 过滤；过线不足 max_keep 个时，放宽到 ABS_FLOOR
-    按分数补足（文静场次也能选出相对最佳时刻，挂机垃圾场次仍被下限挡掉）。"""
-    if not words:
-        return []
-    bursts, thr = danmaku_bursts(danmaku)
-    dur = words[-1][0]
-    # 音频能量全局统计（供窗口内突增判断）
-    estats = None
-    if energy:
-        rms = np.array([r for _, r in energy], dtype=np.float64)
-        if len(rms):
-            estats = (float(rms.mean()), float(rms.std()),
-                      float(np.percentile(rms, 90)))
-    # 全部窗口打分（先不过滤）
-    scored = []
-    ws = 0.0
-    while ws + WIN_SEC <= dur + WIN_STEP:
-        we = min(ws + WIN_SEC, dur)
-        score, reasons, _ = score_window(ws, we, words, danmaku, bursts, energy, estats)
-        scored.append((ws, we, score, reasons))
-        ws += WIN_STEP
-    if not scored:
-        return []
-    ABS_FLOOR = 3.0  # 绝对下限：低于此分视为垃圾，不剪
-    strict = [s for s in scored if s[2] >= KEEP_SCORE]
-    if len(strict) >= max_keep:
-        picked = strict
-    else:
-        # 按分数降序，全部 >= ABS_FLOOR 的都交给 NMS（它自己会取 top，不在这里预切片，
-        # 否则高分窗口互重叠时 NMS 去重后数量不足）
-        scored.sort(key=lambda x: -x[2])
-        picked = [s for s in scored if s[2] >= ABS_FLOOR]
-        if not picked:
-            picked = strict  # 兜底：不应发生（strict 为空才会进此分支）
-    cands = [(ws, we, sc, rs, None) for ws, we, sc, rs in picked]
-    return nms(cands, max_keep)
 
 def snap_boundaries(ws, we, words):
     """按词边界吸附：开头取 ws-2s 后的第一个词起（-0.5s），结尾取 we+2s 前的最后一个词止（+0.5s）。"""
@@ -859,6 +821,12 @@ def _configure_llm(room):
     L.USE_DIRECT = False
     pv = g.get("provider", "deepseek")
     L.LLM_PROVIDER = pv
+    # 人工精选模式：provider=manual 时启用
+    import os
+    if pv == "manual" or os.environ.get("HIGHLIGHT_MANUAL", "0") == "1":
+        L.MANUAL_MODE = True
+    else:
+        L.MANUAL_MODE = False
     # 模型按 provider 校验（防止存的是别的 provider 的模型名）
     # 注意：deepseek-flash 实测返回空内容（API 不报错），已从合法列表移除
     valid_ds = ("deepseek-chat", "deepseek-reasoner")
@@ -930,7 +898,7 @@ def _build_desc(reasons):
 def process_room(room):
     """处理单个房间。"""
     global SEGDIR, ROOM_ID, STREAMER, STATE, WIN_SEC, WIN_STEP
-    global KEEP_SCORE, RETENTION_DAYS, _CUR_ROOM_ID, PLATFORM
+    global KEEP_SCORE, RETENTION_HOURS, _CUR_ROOM_ID, PLATFORM
     global MIN_CLIP, MAX_CLIP
 
     rid = str(room.get("room_id", ""))
@@ -949,15 +917,19 @@ def process_room(room):
     MAX_KEEP = int(clip_cfg.get("max_keep", 3))
     MIN_CLIP = float(clip_cfg.get("min_clip", 180))
     MAX_CLIP = float(clip_cfg.get("max_clip", 300))
-    RETENTION_DAYS = int(clip_cfg.get("retention_days",
-        int(os.environ.get("RECORDING_RETENTION_DAYS", "0"))))
+    _ret_h = clip_cfg.get("retention_hours")
+    if _ret_h is None and "retention_days" in clip_cfg:  # 兼容旧字段
+        _ret_h = int(clip_cfg["retention_days"]) * 24
+    RETENTION_HOURS = int(_ret_h if _ret_h is not None else
+        int(os.environ.get("RECORDING_RETENTION_HOURS",
+            int(os.environ.get("RECORDING_RETENTION_DAYS", "0")) * 24)))
     AI_ENABLED = (room.get("ai", {}) or {}).get("enabled", True)
 
     log(f"===== 房间 {rid}（{STREAMER}） =====")
     log(f"  目录: {SEGDIR}")
     log(f"  参数: win={WIN_SEC:g}s step={WIN_STEP:g}s score>={KEEP_SCORE:g} "
         f"max={MAX_KEEP} clip={MIN_CLIP:g}-{MAX_CLIP:g}s "
-        f"retention={RETENTION_DAYS}d ai={'开' if AI_ENABLED else '关'}")
+        f"retention={RETENTION_HOURS}h ai={'开' if AI_ENABLED else '关'}")
 
     os.makedirs(WORKDIR, exist_ok=True)
     if os.path.exists(STATE):
@@ -991,9 +963,9 @@ def process_room(room):
 
     # 保留策略清理：删除处理完超过 N 天的 .ts/.xml
     # 成品片段 .mp4 共用同一个保留天数参数（按主播名前缀过滤，不删别的房间的）
-    if RETENTION_DAYS > 0 and not DRY_RUN:
+    if RETENTION_HOURS > 0 and not DRY_RUN:
         import time
-        cutoff = time.time() - RETENTION_DAYS * 86400
+        cutoff = time.time() - RETENTION_HOURS * 3600
         for _mp4 in glob.glob(os.path.join(
                 WORKDIR, f"{glob.escape(STREAMER)}_*_精彩_*.mp4")):
             try:
@@ -1013,9 +985,23 @@ def process_room(room):
                             log(f"  保留期满删除: {os.path.basename(p)}")
                         except OSError as e:
                             log(f"  删除失败 {p}: {e}")
-                # 从记录中移除（避免重复尝试）
-                processed.discard(base)
-                processed_at.pop(base, None)
+        # 兜底：直接按文件 mtime 清理超期 ts/xml（防止未进 processed_at 的漏网）
+        try:
+            for fn in os.listdir(SEGDIR):
+                if not (fn.endswith(".ts") or fn.endswith(".xml")):
+                    continue
+                fp = os.path.join(SEGDIR, fn)
+                if os.path.isfile(fp) and os.path.getmtime(fp) < cutoff:
+                    try:
+                        os.remove(fp)
+                        log(f"  兜底删除超期文件: {fn}")
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        # 从记录中移除（避免重复尝试）
+        processed.discard(base)
+        processed_at.pop(base, None)
         save_state()
 
     # 找已完成（6 分钟无变动）的 .ts
@@ -1048,9 +1034,26 @@ def process_room(room):
         log(f"  弹幕 {len(danmaku)} 条")
 
         if TRANSCRIBE_OK:
+            # 内存不足时跳过转写，避免 OOM（可用 <500M 则降级）
+            try:
+                with open("/proc/meminfo") as f:
+                    for line in f:
+                        if line.startswith("MemAvailable:"):
+                            avail_mb = int(line.split()[1]) // 1024
+                            break
+                    else:
+                        avail_mb = 9999
+            except OSError:
+                avail_mb = 9999
+            if avail_mb < 500:
+                log(f"  内存不足 ({avail_mb}M)，切换单进程串行转写")
+                os.environ["TRANSCRIBE_WORKERS"] = "1"
             log("  转写中...")
             words, energy = transcribe_ts(ts_path)  # 内部分块缓存，未完成可续跑
             log(f"  转写完成 {len(words)} 词")
+            # 强制 GC，防 worker 内存泄漏累积
+            import gc
+            gc.collect()
         else:
             words, energy = [], []
 
@@ -1061,9 +1064,12 @@ def process_room(room):
                 try:
                     L = _configure_llm(room)
                     from llm_highlights import pick_highlights_llm
-                    if L.LLM_OK:
+                    if L.LLM_OK or L.MANUAL_MODE:
                         log(f"  LLM 挑选中 [{L.LLM_PROVIDER}/{L.LLM_MODEL}]...")
-                        llm_cands = pick_highlights_llm(words, danmaku, log=log)
+                        llm_cands = pick_highlights_llm(words, danmaku, log=log,
+                            room_id=str(room.get("room_id", "")),
+                            streamer=str(room.get("streamer", "")),
+                            ts_path=ts_path, session_base=0)
                         log(f"  LLM 候选 {len(llm_cands)} 个")
                         cands = nms(llm_cands, max_keep=MAX_KEEP)
                     else:
@@ -1228,8 +1234,16 @@ def cleanup_orphan_segdirs(rooms, log=print):
         sd = r.get("segdir")
         if sd:
             active.add(os.path.basename(os.path.normpath(sd)))
-    retention = 1  # 天，和房间保留期一致
-    cutoff = time.time() - retention * 86400
+    # 孤儿目录用各房间保留小时数的最大值（避免误删）
+    retention = 24
+    for r in rooms:
+        h = (r.get("clip", {}) or {}).get("retention_hours")
+        if h is not None:
+            try:
+                retention = max(retention, int(h))
+            except (TypeError, ValueError):
+                pass
+    cutoff = time.time() - retention * 3600
     for plat in os.listdir(base):
         pdir = os.path.join(base, plat)
         if not os.path.isdir(pdir):
