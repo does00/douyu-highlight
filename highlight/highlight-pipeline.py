@@ -985,6 +985,9 @@ def process_room(room):
                             log(f"  保留期满删除: {os.path.basename(p)}")
                         except OSError as e:
                             log(f"  删除失败 {p}: {e}")
+                # 从记录中移除（避免重复尝试）
+                processed.discard(base)
+                processed_at.pop(base, None)
         # 兜底：直接按文件 mtime 清理超期 ts/xml（防止未进 processed_at 的漏网）
         try:
             for fn in os.listdir(SEGDIR):
@@ -999,9 +1002,6 @@ def process_room(room):
                         pass
         except OSError:
             pass
-        # 从记录中移除（避免重复尝试）
-        processed.discard(base)
-        processed_at.pop(base, None)
         save_state()
 
     # 找已完成（6 分钟无变动）的 .ts
