@@ -1,0 +1,14 @@
+[Unit]
+Description=Highlight pipeline status page
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/hatch/workspace/bililive-cli/highlight-status.py
+Environment=PORT=18022
+Environment=RECORDING_RETENTION_DAYS=1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
