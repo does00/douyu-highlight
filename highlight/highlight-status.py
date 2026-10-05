@@ -174,7 +174,7 @@ label{display:inline-block;min-width:110px;color:#9fb2d8;font-size:13px}
 <div id="tab-ai" class="tab">
 <div class="card"><h2>全局 AI 设置</h2>
 <div class="form-row"><label>服务商</label><select id="ai_provider" onchange="onProviderChange()">
-<option value="deepseek">DeepSeek</option><option value="gemini">Gemini</option><option value="relay">中继</option>
+<option value="deepseek">DeepSeek</option><option value="gemini">Gemini</option><option value="relay">中继</option><option value="manual">人工精选（Muse）</option>
 </select></div>
 <div class="form-row"><label>中继地址</label><input id="ai_relay" style="width:320px"></div>
 <div class="form-row"><label>API Key</label><input id="ai_key" type="password" style="width:320px" placeholder="AIza…（直连模式用，留空则用中继）"></div>
@@ -304,8 +304,8 @@ document.getElementById('clip_form').innerHTML=
 '<span class="hint">打分低于这个的直接扔掉。5=平衡，10=只要高质量（默认，数量少），15=只留最炸的。实测优质片段一般在13-17分</span></div>'+
 '<div class="form-row"><label>最多片段</label><input id="c_max" type="number" value="'+(c.max_keep??3)+'">'+
 '<span class="hint">每个录像文件最多剪几个片段投稿，多了容易审美疲劳</span></div>'+
-'<div class="form-row"><label>保留天数</label><input id="c_ret" type="number" value="'+(c.retention_days??1)+'">'+
-'<span class="hint">原始录像处理完后保留几天再删除，0=永久保留（硬盘要够大）</span></div>'+
+'<div class="form-row"><label>保留小时数</label><input id="c_ret" type="number" value="'+(c.retention_hours??24)+'">'+
+'<span class="hint">原始录像处理完后保留几小时再删除，0=永久保留（硬盘要够大）</span></div>'+
 '<div class="form-row"><label>最短时长</label><input id="c_min" type="number" value="'+(c.min_clip??180)+'">'+
 '<span class="hint">单个片段最短多少秒，太短了讲不清故事，建议不低于30秒</span></div>'+
 '<div class="form-row"><label>最长时长</label><input id="c_maxd" type="number" value="'+(c.max_clip||300)+'">'+
@@ -317,7 +317,7 @@ if(el)el.addEventListener('input',()=>{document.getElementById(msgId).textConten
 async function saveClip(){const i=document.getElementById('clip_room').value;
 const clip={win_sec:+document.getElementById('c_win').value,win_step:+document.getElementById('c_step').value,
 keep_score:+document.getElementById('c_score').value,max_keep:+document.getElementById('c_max').value,
-retention_days:+document.getElementById('c_ret').value,
+retention_hours:+document.getElementById('c_ret').value,
 min_clip:+document.getElementById('c_min').value,max_clip:+document.getElementById('c_maxd').value};
 try{await api('/api/rooms',{method:'POST',body:JSON.stringify({action:'clip',index:+i,clip})});
 savedMsg('msg_clips');await loadStatus();
@@ -335,7 +335,13 @@ sel.innerHTML=models.map(m=>'<option value="'+esc(m)+'"'+(m===cur?' selected':''
 ||'<option value="">（无可用模型）</option>';
 if(cur&&models.indexOf(cur)>=0)sel.value=cur;
 }catch(e){sel.innerHTML='<option value="">加载失败，点刷新重试</option>';}}
-function onProviderChange(){loadModels();}
+function onProviderChange(){const pv=document.getElementById('ai_provider').value;
+const hide=pv==='manual';
+document.getElementById('ai_relay').closest('.form-row').style.display=hide?'none':'';
+document.getElementById('ai_key').closest('.form-row').style.display=hide?'none':'';
+document.getElementById('ai_proxy').closest('.form-row').style.display=hide?'none':'';
+document.getElementById('ai_model').closest('.form-row').style.display=hide?'none':'';
+if(!hide)loadModels();}
 function renderAI(){renderNotify();
 document.getElementById('ai_relay').value=G.ai_global.relay_url||'';
 document.getElementById('ai_provider').value=G.ai_global.provider||'deepseek';
@@ -865,7 +871,7 @@ class Handler(BaseHTTPRequestHandler):
                 "room_id": rid, "platform": platform, "streamer": st, "enabled": True,
                 "segdir": segdir,
                 "clip": {"win_sec": 180, "win_step": 60, "keep_score": 10,
-                         "max_keep": 3, "retention_days": 1,
+                         "max_keep": 3, "retention_hours": 24,
                          "min_clip": 180, "max_clip": 300},
                 "ai": {"enabled": True},
             })
