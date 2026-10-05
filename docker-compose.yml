@@ -43,11 +43,9 @@ services:
       - TZ=Asia/Shanghai
       - BILILIVE_API=http://bililive:18010
       - BILILIVE_PASSKEY=${BILILIVE_PASSKEY:?请在 .env 里设置 BILILIVE_PASSKEY}
-      # 录像目录（biliLive 按主播分子目录）
-      - SEGDIR=/recordings/兔了了丶
-      - STREAMER_NAME=兔了了丶
-      - DOUYU_ROOM_ID=6570336
-      - BILI_UID=500604364
+      # 房间配置走 highlight-rooms.json（挂载到 /work）
+      # 录像目录由 highlight-rooms.json 中各房间的 segdir 指定
+      - BILI_UID=${BILI_UID:-500604364}
       - LLM_PROVIDER=${LLM_PROVIDER:-deepseek}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
@@ -59,8 +57,8 @@ services:
       # .env 里填 DEEPSEEK_API_KEY=sk-... 和 HTTPS_PROXY=http://局域网v2ray:端口
       # Gemini 直连：LLM_PROVIDER=gemini + GEMINI_API_KEY
       # 中继模式（本机）：LLM_API_URL=http://宿主机:18020/generate + LLM_API_TOKEN=xxx
-      # 录像保留天数：0=永久保留（默认），N=处理完N天后删除.ts/.xml
-      - RECORDING_RETENTION_DAYS=${RECORDING_RETENTION_DAYS:-0}
+      # 录像保留小时数：0=永久保留（默认），N=处理完N小时后删除.ts/.xml
+      - RECORDING_RETENTION_HOURS=${RECORDING_RETENTION_HOURS:-0}
     depends_on:
       - bililive
     restart: unless-stopped
@@ -78,7 +76,7 @@ services:
       - WORKDIR=/work/highlights
       - STATE=/work/highlight-state.json
       - LOG=/work/highlight.log
-      - RECORDING_RETENTION_DAYS=${RECORDING_RETENTION_DAYS:-0}
+      - RECORDING_RETENTION_HOURS=${RECORDING_RETENTION_HOURS:-0}
     command: ["python3", "/app/highlight-status.py"]
     depends_on:
       - highlight
